@@ -1,6 +1,6 @@
 #include "test/jemalloc_test.h"
 
-JEMALLOC_INLINE_C void
+static inline void
 time_func(timedelta_t *timer, uint64_t nwarmup, uint64_t niter,
     void (*func)(void)) {
 	uint64_t i;
@@ -156,7 +156,7 @@ TEST_END
 
 int
 main(void) {
-	return test(
+	return test_no_reentrancy(
 	    test_malloc_vs_mallocx,
 	    test_free_vs_dallocx,
 	    test_dallocx_vs_sdallocx,

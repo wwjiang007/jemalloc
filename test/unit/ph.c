@@ -1,5 +1,7 @@
 #include "test/jemalloc_test.h"
 
+#include "jemalloc/internal/ph.h"
+
 typedef struct node_s node_t;
 
 struct node_s {
@@ -142,6 +144,7 @@ TEST_BEGIN(test_ph_empty) {
 	heap_new(&heap);
 	assert_true(heap_empty(&heap), "Heap should be empty");
 	assert_ptr_null(heap_first(&heap), "Unexpected node");
+	assert_ptr_null(heap_any(&heap), "Unexpected node");
 }
 TEST_END
 
@@ -155,6 +158,13 @@ node_remove(heap_t *heap, node_t *node) {
 static node_t *
 node_remove_first(heap_t *heap) {
 	node_t *node = heap_remove_first(heap);
+	node->magic = 0;
+	return node;
+}
+
+static node_t *
+node_remove_any(heap_t *heap) {
+	node_t *node = heap_remove_any(heap);
 	node->magic = 0;
 	return node;
 }
@@ -204,6 +214,8 @@ TEST_BEGIN(test_ph_random) {
 			for (k = 0; k < j; k++) {
 				heap_insert(&heap, &nodes[k]);
 				if (i % 13 == 12) {
+					assert_ptr_not_null(heap_any(&heap),
+					    "Heap should not be empty");
 					/* Trigger merging. */
 					assert_ptr_not_null(heap_first(&heap),
 					    "Heap should not be empty");
@@ -216,7 +228,7 @@ TEST_BEGIN(test_ph_random) {
 			    "Heap should not be empty");
 
 			/* Remove nodes. */
-			switch (i % 4) {
+			switch (i % 6) {
 			case 0:
 				for (k = 0; k < j; k++) {
 					assert_u_eq(heap_validate(&heap), j - k,
@@ -264,11 +276,30 @@ TEST_BEGIN(test_ph_random) {
 					prev = node;
 				}
 				break;
+			} case 4: {
+				for (k = 0; k < j; k++) {
+					node_remove_any(&heap);
+					assert_u_eq(heap_validate(&heap), j - k
+					    - 1, "Incorrect node count");
+				}
+				break;
+			} case 5: {
+				for (k = 0; k < j; k++) {
+					node_t *node = heap_any(&heap);
+					assert_u_eq(heap_validate(&heap), j - k,
+					    "Incorrect node count");
+					node_remove(&heap, node);
+					assert_u_eq(heap_validate(&heap), j - k
+					    - 1, "Incorrect node count");
+				}
+				break;
 			} default:
 				not_reached();
 			}
 
 			assert_ptr_null(heap_first(&heap),
+			    "Heap should be empty");
+			assert_ptr_null(heap_any(&heap),
 			    "Heap should be empty");
 			assert_true(heap_empty(&heap), "Heap should be empty");
 		}

@@ -1,10 +1,18 @@
 #include "test/jemalloc_test.h"
 
-#ifdef JEMALLOC_FILL
-const char *malloc_conf = "junk:false";
-#endif
-
 #include "test/extent_hooks.h"
+
+static bool
+check_background_thread_enabled(void) {
+	bool enabled;
+	size_t sz = sizeof(bool);
+	int ret = mallctl("background_thread", (void *)&enabled, &sz, NULL,0);
+	if (ret == ENOENT) {
+		return false;
+	}
+	assert_d_eq(ret, 0, "Unexpected mallctl error");
+	return enabled;
+}
 
 static void
 test_extent_body(unsigned arena_ind) {
@@ -31,10 +39,13 @@ test_extent_body(unsigned arena_ind) {
 	assert_d_eq(mallctlnametomib("arena.0.purge", purge_mib, &purge_miblen),
 	    0, "Unexpected mallctlnametomib() failure");
 	purge_mib[1] = (size_t)arena_ind;
+	called_alloc = false;
+	try_alloc = true;
 	try_dalloc = false;
 	try_decommit = false;
 	p = mallocx(large0 * 2, flags);
 	assert_ptr_not_null(p, "Unexpected mallocx() error");
+	assert_true(called_alloc, "Expected alloc call");
 	called_dalloc = false;
 	called_decommit = false;
 	did_purge_lazy = false;
@@ -87,7 +98,8 @@ test_extent_body(unsigned arena_ind) {
 	dallocx(p, flags);
 }
 
-TEST_BEGIN(test_extent_manual_hook) {
+static void
+test_manual_hook_body(void) {
 	unsigned arena_ind;
 	size_t old_size, new_size, sz;
 	size_t hooks_mib[3];
@@ -128,7 +140,9 @@ TEST_BEGIN(test_extent_manual_hook) {
 	assert_ptr_ne(old_hooks->merge, extent_merge_hook,
 	    "Unexpected extent_hooks error");
 
-	test_extent_body(arena_ind);
+	if (!check_background_thread_enabled()) {
+		test_extent_body(arena_ind);
+	}
 
 	/* Restore extent hooks. */
 	assert_d_eq(mallctlbymib(hooks_mib, hooks_miblen, NULL, NULL,
@@ -153,6 +167,21 @@ TEST_BEGIN(test_extent_manual_hook) {
 	assert_ptr_eq(old_hooks->merge, default_hooks->merge,
 	    "Unexpected extent_hooks error");
 }
+
+TEST_BEGIN(test_extent_manual_hook) {
+	test_manual_hook_body();
+
+	/* Test failure paths. */
+	try_split = false;
+	test_manual_hook_body();
+	try_merge = false;
+	test_manual_hook_body();
+	try_purge_lazy = false;
+	try_purge_forced = false;
+	test_manual_hook_body();
+
+	try_split = try_merge = try_purge_lazy = try_purge_forced = true;
+}
 TEST_END
 
 TEST_BEGIN(test_extent_auto_hook) {
@@ -168,6 +197,7 @@ TEST_BEGIN(test_extent_auto_hook) {
 	assert_d_eq(mallctl("arenas.create", (void *)&arena_ind, &sz,
 	    (void *)&new_hooks, new_size), 0, "Unexpected mallctl() failure");
 
+	test_skip_if(check_background_thread_enabled());
 	test_extent_body(arena_ind);
 }
 TEST_END

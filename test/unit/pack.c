@@ -1,15 +1,12 @@
 #include "test/jemalloc_test.h"
 
-/* Immediately purge to minimize fragmentation. */
-const char *malloc_conf = "decay_time:-1";
-
 /*
  * Size class that is a divisor of the page size, ideally 4+ regions per run.
  */
 #if LG_PAGE <= 14
 #define SZ	(ZU(1) << (LG_PAGE - 2))
 #else
-#define SZ	4096
+#define SZ	ZU(4096)
 #endif
 
 /*
@@ -91,6 +88,12 @@ arena_reset_mallctl(unsigned arena_ind) {
 }
 
 TEST_BEGIN(test_pack) {
+	bool prof_enabled;
+	size_t sz = sizeof(prof_enabled);
+	if (mallctl("opt.prof", (void *)&prof_enabled, &sz, NULL, 0) == 0) {
+		test_skip_if(prof_enabled);
+	}
+
 	unsigned arena_ind = arenas_create_mallctl();
 	size_t nregs_per_run = nregs_per_run_compute();
 	size_t nregs = nregs_per_run * NSLABS;

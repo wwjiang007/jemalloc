@@ -1,10 +1,5 @@
 #include "test/jemalloc_test.h"
 
-#ifdef JEMALLOC_PROF
-const char *malloc_conf =
-    "prof:true,prof_active:false,lg_prof_sample:0";
-#endif
-
 static int
 prof_dump_open_intercept(bool propagate_err, const char *filename) {
 	int fd;
@@ -283,7 +278,7 @@ main(void) {
 	/* Intercept dumping prior to running any tests. */
 	prof_dump_open = prof_dump_open_intercept;
 
-	return test(
+	return test_no_reentrancy(
 	    test_prof_reset_basic,
 	    test_prof_reset_cleanup,
 	    test_prof_reset,

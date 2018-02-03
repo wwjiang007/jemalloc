@@ -1,8 +1,8 @@
 #ifndef JEMALLOC_INTERNAL_TCACHE_TYPES_H
 #define JEMALLOC_INTERNAL_TCACHE_TYPES_H
 
-typedef struct tcache_bin_info_s tcache_bin_info_t;
-typedef struct tcache_bin_s tcache_bin_t;
+#include "jemalloc/internal/size_classes.h"
+
 typedef struct tcache_s tcache_t;
 typedef struct tcaches_s tcaches_t;
 
@@ -46,5 +46,11 @@ typedef struct tcaches_s tcaches_t;
 /* Number of tcache allocation/deallocation events between incremental GCs. */
 #define TCACHE_GC_INCR							\
     ((TCACHE_GC_SWEEP / NBINS) + ((TCACHE_GC_SWEEP / NBINS == 0) ? 0 : 1))
+
+/* Used in TSD static initializer only. Real init in tcache_data_init(). */
+#define TCACHE_ZERO_INITIALIZER {0}
+
+/* Used in TSD static initializer only. Will be initialized to opt_tcache. */
+#define TCACHE_ENABLED_ZERO_INITIALIZER false
 
 #endif /* JEMALLOC_INTERNAL_TCACHE_TYPES_H */

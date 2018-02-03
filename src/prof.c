@@ -1,5 +1,13 @@
 #define JEMALLOC_PROF_C_
-#include "jemalloc/internal/jemalloc_internal.h"
+#include "jemalloc/internal/jemalloc_preamble.h"
+#include "jemalloc/internal/jemalloc_internal_includes.h"
+
+#include "jemalloc/internal/assert.h"
+#include "jemalloc/internal/ckh.h"
+#include "jemalloc/internal/hash.h"
+#include "jemalloc/internal/malloc_io.h"
+#include "jemalloc/internal/mutex.h"
+
 /******************************************************************************/
 
 #ifdef JEMALLOC_PROF_LIBUNWIND
@@ -8,7 +16,14 @@
 #endif
 
 #ifdef JEMALLOC_PROF_LIBGCC
+/*
+ * We have a circular dependency -- jemalloc_internal.h tells us if we should
+ * use libgcc's unwinding functionality, but after we've included that, we've
+ * already hooked _Unwind_Backtrace.  We'll temporarily disable hooking.
+ */
+#undef _Unwind_Backtrace
 #include <unwind.h>
+#define _Unwind_Backtrace JEMALLOC_HOOK(_Unwind_Backtrace, hooks_libc_hook)
 #endif
 
 /******************************************************************************/
@@ -63,7 +78,7 @@ size_t		lg_prof_sample;
  * creating/destroying mutexes.
  */
 static malloc_mutex_t	*gctx_locks;
-static unsigned		cum_gctxs; /* Atomic counter. */
+static atomic_u_t	cum_gctxs; /* Atomic counter. */
 
 /*
  * Table of mutexes that are shared among tdata's.  No operations require
@@ -78,7 +93,8 @@ static malloc_mutex_t	*tdata_locks;
  * structure that knows about all backtraces currently captured.
  */
 static ckh_t		bt2gctx;
-static malloc_mutex_t	bt2gctx_mtx;
+/* Non static to enable profiling. */
+malloc_mutex_t		bt2gctx_mtx;
 
 /*
  * Tree of all extant prof_tdata_t structures, regardless of state,
@@ -132,7 +148,7 @@ static char	*prof_thread_name_alloc(tsdn_t *tsdn, const char *thread_name);
 /******************************************************************************/
 /* Red-black trees. */
 
-JEMALLOC_INLINE_C int
+static int
 prof_tctx_comp(const prof_tctx_t *a, const prof_tctx_t *b) {
 	uint64_t a_thr_uid = a->thr_uid;
 	uint64_t b_thr_uid = b->thr_uid;
@@ -155,7 +171,7 @@ prof_tctx_comp(const prof_tctx_t *a, const prof_tctx_t *b) {
 rb_gen(static UNUSED, tctx_tree_, prof_tctx_tree_t, prof_tctx_t,
     tctx_link, prof_tctx_comp)
 
-JEMALLOC_INLINE_C int
+static int
 prof_gctx_comp(const prof_gctx_t *a, const prof_gctx_t *b) {
 	unsigned a_len = a->bt.len;
 	unsigned b_len = b->bt.len;
@@ -170,7 +186,7 @@ prof_gctx_comp(const prof_gctx_t *a, const prof_gctx_t *b) {
 rb_gen(static UNUSED, gctx_tree_, prof_gctx_tree_t, prof_gctx_t, dump_link,
     prof_gctx_comp)
 
-JEMALLOC_INLINE_C int
+static int
 prof_tdata_comp(const prof_tdata_t *a, const prof_tdata_t *b) {
 	int ret;
 	uint64_t a_uid = a->thr_uid;
@@ -222,9 +238,9 @@ prof_alloc_rollback(tsd_t *tsd, prof_tctx_t *tctx, bool updated) {
 }
 
 void
-prof_malloc_sample_object(tsdn_t *tsdn, extent_t *extent, const void *ptr,
-    size_t usize, prof_tctx_t *tctx) {
-	prof_tctx_set(tsdn, extent, ptr, usize, tctx);
+prof_malloc_sample_object(tsdn_t *tsdn, const void *ptr, size_t usize,
+    prof_tctx_t *tctx) {
+	prof_tctx_set(tsdn, ptr, usize, NULL, tctx);
 
 	malloc_mutex_lock(tsdn, tctx->tdata->lock);
 	tctx->cnts.curobjs++;
@@ -260,7 +276,7 @@ bt_init(prof_bt_t *bt, void **vec) {
 	bt->len = 0;
 }
 
-JEMALLOC_INLINE_C void
+static void
 prof_enter(tsd_t *tsd, prof_tdata_t *tdata) {
 	cassert(config_prof);
 	assert(tdata == prof_tdata_get(tsd, false));
@@ -273,7 +289,7 @@ prof_enter(tsd_t *tsd, prof_tdata_t *tdata) {
 	malloc_mutex_lock(tsd_tsdn(tsd), &bt2gctx_mtx);
 }
 
-JEMALLOC_INLINE_C void
+static void
 prof_leave(tsd_t *tsd, prof_tdata_t *tdata) {
 	cassert(config_prof);
 	assert(tdata == prof_tdata_get(tsd, false));
@@ -523,7 +539,7 @@ prof_backtrace(prof_bt_t *bt) {
 
 static malloc_mutex_t *
 prof_gctx_mutex_choose(void) {
-	unsigned ngctxs = atomic_add_u(&cum_gctxs, 1);
+	unsigned ngctxs = atomic_fetch_add_u(&cum_gctxs, 1, ATOMIC_RELAXED);
 
 	return &gctx_locks[(ngctxs - 1) % PROF_NCTX_LOCKS];
 }
@@ -540,7 +556,7 @@ prof_gctx_create(tsdn_t *tsdn, prof_bt_t *bt) {
 	 */
 	size_t size = offsetof(prof_gctx_t, vec) + (bt->len * sizeof(void *));
 	prof_gctx_t *gctx = (prof_gctx_t *)iallocztm(tsdn, size,
-	    size2index(size), false, NULL, true, arena_get(TSDN_NULL, 0, true),
+	    sz_size2index(size), false, NULL, true, arena_get(TSDN_NULL, 0, true),
 	    true);
 	if (gctx == NULL) {
 		return NULL;
@@ -582,8 +598,7 @@ prof_gctx_try_destroy(tsd_t *tsd, prof_tdata_t *tdata_self, prof_gctx_t *gctx,
 		prof_leave(tsd, tdata_self);
 		/* Destroy gctx. */
 		malloc_mutex_unlock(tsd_tsdn(tsd), gctx->lock);
-		idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd), gctx), gctx,
-		    NULL, true, true);
+		idalloctm(tsd_tsdn(tsd), gctx, NULL, NULL, true, true);
 	} else {
 		/*
 		 * Compensate for increment in prof_tctx_destroy() or
@@ -697,8 +712,7 @@ prof_tctx_destroy(tsd_t *tsd, prof_tctx_t *tctx) {
 	}
 
 	if (destroy_tctx) {
-		idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd), tctx), tctx,
-		    NULL, true, true);
+		idalloctm(tsd_tsdn(tsd), tctx, NULL, NULL, true, true);
 	}
 }
 
@@ -730,8 +744,8 @@ prof_lookup_global(tsd_t *tsd, prof_bt_t *bt, prof_tdata_t *tdata,
 			if (ckh_insert(tsd, &bt2gctx, btkey.v, gctx.v)) {
 				/* OOM. */
 				prof_leave(tsd, tdata);
-				idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd),
-				    gctx.v), gctx.v, NULL, true, true);
+				idalloctm(tsd_tsdn(tsd), gctx.v, NULL, NULL,
+				    true, true);
 				return true;
 			}
 			new_gctx = true;
@@ -755,8 +769,8 @@ prof_lookup_global(tsd_t *tsd, prof_bt_t *bt, prof_tdata_t *tdata,
 
 		if (tgctx.v != NULL) {
 			/* Lost race to insert. */
-			idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd),
-			    tgctx.v), tgctx.v, NULL, true, true);
+			idalloctm(tsd_tsdn(tsd), tgctx.v, NULL, NULL, true,
+			    true);
 		}
 	}
 	prof_leave(tsd, tdata);
@@ -805,7 +819,7 @@ prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 
 		/* Link a prof_tctx_t into gctx for this thread. */
 		ret.v = iallocztm(tsd_tsdn(tsd), sizeof(prof_tctx_t),
-		    size2index(sizeof(prof_tctx_t)), false, NULL, true,
+		    sz_size2index(sizeof(prof_tctx_t)), false, NULL, true,
 		    arena_ichoose(tsd, NULL), true);
 		if (ret.p == NULL) {
 			if (new_gctx) {
@@ -828,8 +842,7 @@ prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 			if (new_gctx) {
 				prof_gctx_try_destroy(tsd, tdata, gctx, tdata);
 			}
-			idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd), ret.v),
-			    ret.v, NULL, true, true);
+			idalloctm(tsd_tsdn(tsd), ret.v, NULL, NULL, true, true);
 			return NULL;
 		}
 		malloc_mutex_lock(tsd_tsdn(tsd), gctx->lock);
@@ -920,9 +933,7 @@ prof_tdata_count(void) {
 
 	return tdata_count;
 }
-#endif
 
-#ifdef JEMALLOC_JET
 size_t
 prof_bt_count(void) {
 	size_t bt_count;
@@ -943,12 +954,8 @@ prof_bt_count(void) {
 }
 #endif
 
-#ifdef JEMALLOC_JET
-#undef prof_dump_open
-#define prof_dump_open JEMALLOC_N(prof_dump_open_impl)
-#endif
 static int
-prof_dump_open(bool propagate_err, const char *filename) {
+prof_dump_open_impl(bool propagate_err, const char *filename) {
 	int fd;
 
 	fd = creat(filename, 0644);
@@ -962,11 +969,7 @@ prof_dump_open(bool propagate_err, const char *filename) {
 
 	return fd;
 }
-#ifdef JEMALLOC_JET
-#undef prof_dump_open
-#define prof_dump_open JEMALLOC_N(prof_dump_open)
-prof_dump_open_t *prof_dump_open = JEMALLOC_N(prof_dump_open_impl);
-#endif
+prof_dump_open_t *JET_MUTABLE prof_dump_open = prof_dump_open_impl;
 
 static bool
 prof_dump_flush(bool propagate_err) {
@@ -1240,9 +1243,8 @@ prof_gctx_finish(tsd_t *tsd, prof_gctx_tree_t *gctxs) {
 					    to_destroy);
 					tctx_tree_remove(&gctx->tctxs,
 					    to_destroy);
-					idalloctm(tsd_tsdn(tsd),
-					    iealloc(tsd_tsdn(tsd), to_destroy),
-					    to_destroy, NULL, true, true);
+					idalloctm(tsd_tsdn(tsd), to_destroy,
+					    NULL, NULL, true, true);
 				} else {
 					next = NULL;
 				}
@@ -1320,12 +1322,9 @@ prof_tdata_dump_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
 	return NULL;
 }
 
-#ifdef JEMALLOC_JET
-#undef prof_dump_header
-#define prof_dump_header JEMALLOC_N(prof_dump_header_impl)
-#endif
 static bool
-prof_dump_header(tsdn_t *tsdn, bool propagate_err, const prof_cnt_t *cnt_all) {
+prof_dump_header_impl(tsdn_t *tsdn, bool propagate_err,
+    const prof_cnt_t *cnt_all) {
 	bool ret;
 
 	if (prof_dump_printf(propagate_err,
@@ -1342,11 +1341,7 @@ prof_dump_header(tsdn_t *tsdn, bool propagate_err, const prof_cnt_t *cnt_all) {
 	malloc_mutex_unlock(tsdn, &tdatas_mtx);
 	return ret;
 }
-#ifdef JEMALLOC_JET
-#undef prof_dump_header
-#define prof_dump_header JEMALLOC_N(prof_dump_header)
-prof_dump_header_t *prof_dump_header = JEMALLOC_N(prof_dump_header_impl);
-#endif
+prof_dump_header_t *JET_MUTABLE prof_dump_header = prof_dump_header_impl;
 
 static bool
 prof_dump_gctx(tsdn_t *tsdn, bool propagate_err, prof_gctx_t *gctx,
@@ -1414,7 +1409,15 @@ prof_open_maps(const char *format, ...) {
 	va_start(ap, format);
 	malloc_vsnprintf(filename, sizeof(filename), format, ap);
 	va_end(ap);
+
+#if defined(O_CLOEXEC)
+	mfd = open(filename, O_RDONLY | O_CLOEXEC);
+#else
 	mfd = open(filename, O_RDONLY);
+	if (mfd != -1) {
+		fcntl(mfd, F_SETFD, fcntl(mfd, F_GETFD) | FD_CLOEXEC);
+	}
+#endif
 
 	return mfd;
 }
@@ -1630,30 +1633,30 @@ label_write_error:
 static bool
 prof_dump(tsd_t *tsd, bool propagate_err, const char *filename,
     bool leakcheck) {
-	prof_tdata_t *tdata;
-	struct prof_tdata_merge_iter_arg_s prof_tdata_merge_iter_arg;
-	struct prof_gctx_merge_iter_arg_s prof_gctx_merge_iter_arg;
-	struct prof_gctx_dump_iter_arg_s prof_gctx_dump_iter_arg;
-	prof_gctx_tree_t gctxs;
-	bool err;
-
 	cassert(config_prof);
+	assert(tsd_reentrancy_level_get(tsd) == 0);
 
-	tdata = prof_tdata_get(tsd, true);
+	prof_tdata_t * tdata = prof_tdata_get(tsd, true);
 	if (tdata == NULL) {
 		return true;
 	}
 
+	pre_reentrancy(tsd, NULL);
 	malloc_mutex_lock(tsd_tsdn(tsd), &prof_dump_mtx);
 
+	prof_gctx_tree_t gctxs;
+	struct prof_tdata_merge_iter_arg_s prof_tdata_merge_iter_arg;
+	struct prof_gctx_merge_iter_arg_s prof_gctx_merge_iter_arg;
+	struct prof_gctx_dump_iter_arg_s prof_gctx_dump_iter_arg;
 	prof_dump_prep(tsd, tdata, &prof_tdata_merge_iter_arg,
 	    &prof_gctx_merge_iter_arg, &gctxs);
-	err = prof_dump_file(tsd, propagate_err, filename, leakcheck, tdata,
+	bool err = prof_dump_file(tsd, propagate_err, filename, leakcheck, tdata,
 	    &prof_tdata_merge_iter_arg, &prof_gctx_merge_iter_arg,
 	    &prof_gctx_dump_iter_arg, &gctxs);
 	prof_gctx_finish(tsd, &gctxs);
 
 	malloc_mutex_unlock(tsd_tsdn(tsd), &prof_dump_mtx);
+	post_reentrancy(tsd);
 
 	if (err) {
 		return true;
@@ -1746,6 +1749,7 @@ prof_fdump(void) {
 		return;
 	}
 	tsd = tsd_fetch();
+	assert(tsd_reentrancy_level_get(tsd) == 0);
 
 	malloc_mutex_lock(tsd_tsdn(tsd), &prof_dump_seq_mtx);
 	prof_dump_filename(filename, 'f', VSEQ_INVALID);
@@ -1759,11 +1763,13 @@ prof_accum_init(tsdn_t *tsdn, prof_accum_t *prof_accum) {
 
 #ifndef JEMALLOC_ATOMIC_U64
 	if (malloc_mutex_init(&prof_accum->mtx, "prof_accum",
-	    WITNESS_RANK_PROF_ACCUM)) {
+	    WITNESS_RANK_PROF_ACCUM, malloc_mutex_rank_exclusive)) {
 		return true;
 	}
-#endif
 	prof_accum->accumbytes = 0;
+#else
+	atomic_store_u64(&prof_accum->accumbytes, 0, ATOMIC_RELAXED);
+#endif
 	return false;
 }
 
@@ -1778,6 +1784,10 @@ prof_idump(tsdn_t *tsdn) {
 		return;
 	}
 	tsd = tsdn_tsd(tsdn);
+	if (tsd_reentrancy_level_get(tsd) > 0) {
+		return;
+	}
+
 	tdata = prof_tdata_get(tsd, false);
 	if (tdata == NULL) {
 		return;
@@ -1799,14 +1809,13 @@ prof_idump(tsdn_t *tsdn) {
 
 bool
 prof_mdump(tsd_t *tsd, const char *filename) {
-	char filename_buf[DUMP_FILENAME_BUFSIZE];
-
 	cassert(config_prof);
+	assert(tsd_reentrancy_level_get(tsd) == 0);
 
 	if (!opt_prof || !prof_booted) {
 		return true;
 	}
-
+	char filename_buf[DUMP_FILENAME_BUFSIZE];
 	if (filename == NULL) {
 		/* No filename specified, so automatically generate one. */
 		if (opt_prof_prefix[0] == '\0') {
@@ -1832,6 +1841,10 @@ prof_gdump(tsdn_t *tsdn) {
 		return;
 	}
 	tsd = tsdn_tsd(tsdn);
+	if (tsd_reentrancy_level_get(tsd) > 0) {
+		return;
+	}
+
 	tdata = prof_tdata_get(tsd, false);
 	if (tdata == NULL) {
 		return;
@@ -1873,7 +1886,7 @@ prof_bt_keycomp(const void *k1, const void *k2) {
 	return (memcmp(bt1->vec, bt2->vec, bt1->len * sizeof(void *)) == 0);
 }
 
-JEMALLOC_INLINE_C uint64_t
+static uint64_t
 prof_thr_uid_alloc(tsdn_t *tsdn) {
 	uint64_t thr_uid;
 
@@ -1894,7 +1907,7 @@ prof_tdata_init_impl(tsd_t *tsd, uint64_t thr_uid, uint64_t thr_discrim,
 
 	/* Initialize an empty cache for this thread. */
 	tdata = (prof_tdata_t *)iallocztm(tsd_tsdn(tsd), sizeof(prof_tdata_t),
-	    size2index(sizeof(prof_tdata_t)), false, NULL, true,
+	    sz_size2index(sizeof(prof_tdata_t)), false, NULL, true,
 	    arena_get(TSDN_NULL, 0, true), true);
 	if (tdata == NULL) {
 		return NULL;
@@ -1910,8 +1923,7 @@ prof_tdata_init_impl(tsd_t *tsd, uint64_t thr_uid, uint64_t thr_discrim,
 
 	if (ckh_new(tsd, &tdata->bt2tctx, PROF_CKH_MINITEMS, prof_bt_hash,
 	    prof_bt_keycomp)) {
-		idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd), tdata), tdata,
-		    NULL, true, true);
+		idalloctm(tsd_tsdn(tsd), tdata, NULL, NULL, true, true);
 		return NULL;
 	}
 
@@ -1967,12 +1979,11 @@ prof_tdata_destroy_locked(tsd_t *tsd, prof_tdata_t *tdata,
 	assert(prof_tdata_should_destroy_unlocked(tdata, even_if_attached));
 
 	if (tdata->thread_name != NULL) {
-		idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd),
-		    tdata->thread_name), tdata->thread_name, NULL, true, true);
+		idalloctm(tsd_tsdn(tsd), tdata->thread_name, NULL, NULL, true,
+		    true);
 	}
 	ckh_delete(tsd, &tdata->bt2tctx);
-	idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd), tdata), tdata, NULL,
-	    true, true);
+	idalloctm(tsd_tsdn(tsd), tdata, NULL, NULL, true, true);
 }
 
 static void
@@ -2132,7 +2143,7 @@ prof_thread_name_alloc(tsdn_t *tsdn, const char *thread_name) {
 		return "";
 	}
 
-	ret = iallocztm(tsdn, size, size2index(size), false, NULL, true,
+	ret = iallocztm(tsdn, size, sz_size2index(size), false, NULL, true,
 	    arena_get(TSDN_NULL, 0, true), true);
 	if (ret == NULL) {
 		return NULL;
@@ -2169,8 +2180,8 @@ prof_thread_name_set(tsd_t *tsd, const char *thread_name) {
 	}
 
 	if (tdata->thread_name != NULL) {
-		idalloctm(tsd_tsdn(tsd), iealloc(tsd_tsdn(tsd),
-		    tdata->thread_name), tdata->thread_name, NULL, true, true);
+		idalloctm(tsd_tsdn(tsd), tdata->thread_name, NULL, NULL, true,
+		    true);
 		tdata->thread_name = NULL;
 	}
 	if (strlen(s) > 0) {
@@ -2287,20 +2298,21 @@ prof_boot2(tsd_t *tsd) {
 
 		prof_active = opt_prof_active;
 		if (malloc_mutex_init(&prof_active_mtx, "prof_active",
-		    WITNESS_RANK_PROF_ACTIVE)) {
+		    WITNESS_RANK_PROF_ACTIVE, malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 
 		prof_gdump_val = opt_prof_gdump;
 		if (malloc_mutex_init(&prof_gdump_mtx, "prof_gdump",
-		    WITNESS_RANK_PROF_GDUMP)) {
+		    WITNESS_RANK_PROF_GDUMP, malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 
 		prof_thread_active_init = opt_prof_thread_active_init;
 		if (malloc_mutex_init(&prof_thread_active_init_mtx,
 		    "prof_thread_active_init",
-		    WITNESS_RANK_PROF_THREAD_ACTIVE_INIT)) {
+		    WITNESS_RANK_PROF_THREAD_ACTIVE_INIT,
+		    malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 
@@ -2309,28 +2321,28 @@ prof_boot2(tsd_t *tsd) {
 			return true;
 		}
 		if (malloc_mutex_init(&bt2gctx_mtx, "prof_bt2gctx",
-		    WITNESS_RANK_PROF_BT2GCTX)) {
+		    WITNESS_RANK_PROF_BT2GCTX, malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 
 		tdata_tree_new(&tdatas);
 		if (malloc_mutex_init(&tdatas_mtx, "prof_tdatas",
-		    WITNESS_RANK_PROF_TDATAS)) {
+		    WITNESS_RANK_PROF_TDATAS, malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 
 		next_thr_uid = 0;
 		if (malloc_mutex_init(&next_thr_uid_mtx, "prof_next_thr_uid",
-		    WITNESS_RANK_PROF_NEXT_THR_UID)) {
+		    WITNESS_RANK_PROF_NEXT_THR_UID, malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 
 		if (malloc_mutex_init(&prof_dump_seq_mtx, "prof_dump_seq",
-		    WITNESS_RANK_PROF_DUMP_SEQ)) {
+		    WITNESS_RANK_PROF_DUMP_SEQ, malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 		if (malloc_mutex_init(&prof_dump_mtx, "prof_dump",
-		    WITNESS_RANK_PROF_DUMP)) {
+		    WITNESS_RANK_PROF_DUMP, malloc_mutex_rank_exclusive)) {
 			return true;
 		}
 
@@ -2350,7 +2362,8 @@ prof_boot2(tsd_t *tsd) {
 		}
 		for (i = 0; i < PROF_NCTX_LOCKS; i++) {
 			if (malloc_mutex_init(&gctx_locks[i], "prof_gctx",
-			    WITNESS_RANK_PROF_GCTX)) {
+			    WITNESS_RANK_PROF_GCTX,
+			    malloc_mutex_rank_exclusive)) {
 				return true;
 			}
 		}
@@ -2363,7 +2376,8 @@ prof_boot2(tsd_t *tsd) {
 		}
 		for (i = 0; i < PROF_NTDATA_LOCKS; i++) {
 			if (malloc_mutex_init(&tdata_locks[i], "prof_tdata",
-			    WITNESS_RANK_PROF_TDATA)) {
+			    WITNESS_RANK_PROF_TDATA,
+			    malloc_mutex_rank_exclusive)) {
 				return true;
 			}
 		}

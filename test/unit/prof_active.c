@@ -1,10 +1,5 @@
 #include "test/jemalloc_test.h"
 
-#ifdef JEMALLOC_PROF
-const char *malloc_conf =
-    "prof:true,prof_thread_active_init:false,lg_prof_sample:0";
-#endif
-
 static void
 mallctl_bool_get(const char *name, bool expected, const char *func, int line) {
 	bool old;
@@ -117,6 +112,6 @@ TEST_END
 
 int
 main(void) {
-	return test(
+	return test_no_reentrancy(
 	    test_prof_active);
 }

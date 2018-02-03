@@ -5,6 +5,7 @@
 static extent_hooks_t hooks_null = {
 	extent_alloc_hook,
 	NULL, /* dalloc */
+	NULL, /* destroy */
 	NULL, /* commit */
 	NULL, /* decommit */
 	NULL, /* purge_lazy */
@@ -16,6 +17,7 @@ static extent_hooks_t hooks_null = {
 static extent_hooks_t hooks_not_null = {
 	extent_alloc_hook,
 	extent_dalloc_hook,
+	extent_destroy_hook,
 	NULL, /* commit */
 	extent_decommit_hook,
 	extent_purge_lazy_hook,
@@ -25,66 +27,77 @@ static extent_hooks_t hooks_not_null = {
 };
 
 TEST_BEGIN(test_base_hooks_default) {
-	tsdn_t *tsdn;
 	base_t *base;
-	size_t allocated0, allocated1, resident, mapped;
+	size_t allocated0, allocated1, resident, mapped, n_thp;
 
-	tsdn = tsdn_fetch();
+	tsdn_t *tsdn = tsd_tsdn(tsd_fetch());
 	base = base_new(tsdn, 0, (extent_hooks_t *)&extent_hooks_default);
 
 	if (config_stats) {
-		base_stats_get(tsdn, base, &allocated0, &resident, &mapped);
+		base_stats_get(tsdn, base, &allocated0, &resident, &mapped,
+		    &n_thp);
 		assert_zu_ge(allocated0, sizeof(base_t),
 		    "Base header should count as allocated");
+		if (opt_metadata_thp == metadata_thp_always) {
+			assert_zu_gt(n_thp, 0,
+			    "Base should have 1 THP at least.");
+		}
 	}
 
 	assert_ptr_not_null(base_alloc(tsdn, base, 42, 1),
 	    "Unexpected base_alloc() failure");
 
 	if (config_stats) {
-		base_stats_get(tsdn, base, &allocated1, &resident, &mapped);
+		base_stats_get(tsdn, base, &allocated1, &resident, &mapped,
+		    &n_thp);
 		assert_zu_ge(allocated1 - allocated0, 42,
 		    "At least 42 bytes were allocated by base_alloc()");
 	}
 
-	base_delete(base);
+	base_delete(tsdn, base);
 }
 TEST_END
 
 TEST_BEGIN(test_base_hooks_null) {
 	extent_hooks_t hooks_orig;
-	tsdn_t *tsdn;
 	base_t *base;
-	size_t allocated0, allocated1, resident, mapped;
+	size_t allocated0, allocated1, resident, mapped, n_thp;
 
 	extent_hooks_prep();
 	try_dalloc = false;
+	try_destroy = true;
 	try_decommit = false;
 	try_purge_lazy = false;
 	try_purge_forced = false;
 	memcpy(&hooks_orig, &hooks, sizeof(extent_hooks_t));
 	memcpy(&hooks, &hooks_null, sizeof(extent_hooks_t));
 
-	tsdn = tsdn_fetch();
+	tsdn_t *tsdn = tsd_tsdn(tsd_fetch());
 	base = base_new(tsdn, 0, &hooks);
 	assert_ptr_not_null(base, "Unexpected base_new() failure");
 
 	if (config_stats) {
-		base_stats_get(tsdn, base, &allocated0, &resident, &mapped);
+		base_stats_get(tsdn, base, &allocated0, &resident, &mapped,
+		    &n_thp);
 		assert_zu_ge(allocated0, sizeof(base_t),
 		    "Base header should count as allocated");
+		if (opt_metadata_thp == metadata_thp_always) {
+			assert_zu_gt(n_thp, 0,
+			    "Base should have 1 THP at least.");
+		}
 	}
 
 	assert_ptr_not_null(base_alloc(tsdn, base, 42, 1),
 	    "Unexpected base_alloc() failure");
 
 	if (config_stats) {
-		base_stats_get(tsdn, base, &allocated1, &resident, &mapped);
+		base_stats_get(tsdn, base, &allocated1, &resident, &mapped,
+		    &n_thp);
 		assert_zu_ge(allocated1 - allocated0, 42,
 		    "At least 42 bytes were allocated by base_alloc()");
 	}
 
-	base_delete(base);
+	base_delete(tsdn, base);
 
 	memcpy(&hooks, &hooks_orig, sizeof(extent_hooks_t));
 }
@@ -92,19 +105,19 @@ TEST_END
 
 TEST_BEGIN(test_base_hooks_not_null) {
 	extent_hooks_t hooks_orig;
-	tsdn_t *tsdn;
 	base_t *base;
 	void *p, *q, *r, *r_exp;
 
 	extent_hooks_prep();
 	try_dalloc = false;
+	try_destroy = true;
 	try_decommit = false;
 	try_purge_lazy = false;
 	try_purge_forced = false;
 	memcpy(&hooks_orig, &hooks, sizeof(extent_hooks_t));
 	memcpy(&hooks, &hooks_not_null, sizeof(extent_hooks_t));
 
-	tsdn = tsdn_fetch();
+	tsdn_t *tsdn = tsd_tsdn(tsd_fetch());
 	did_alloc = false;
 	base = base_new(tsdn, 0, &hooks);
 	assert_ptr_not_null(base, "Unexpected base_new() failure");
@@ -154,10 +167,10 @@ TEST_BEGIN(test_base_hooks_not_null) {
 	 * that the first block's remaining space is considered for subsequent
 	 * allocation.
 	 */
-	assert_zu_ge(extent_size_get(&base->blocks->extent), QUANTUM,
+	assert_zu_ge(extent_bsize_get(&base->blocks->extent), QUANTUM,
 	    "Remainder insufficient for test");
 	/* Use up all but one quantum of block. */
-	while (extent_size_get(&base->blocks->extent) > QUANTUM) {
+	while (extent_bsize_get(&base->blocks->extent) > QUANTUM) {
 		p = base_alloc(tsdn, base, QUANTUM, QUANTUM);
 		assert_ptr_not_null(p, "Unexpected base_alloc() failure");
 	}
@@ -194,15 +207,17 @@ TEST_BEGIN(test_base_hooks_not_null) {
 		}
 	}
 
-	called_dalloc = called_decommit = called_purge_lazy =
+	called_dalloc = called_destroy = called_decommit = called_purge_lazy =
 	    called_purge_forced = false;
-	base_delete(base);
+	base_delete(tsdn, base);
 	assert_true(called_dalloc, "Expected dalloc call");
+	assert_true(!called_destroy, "Unexpected destroy call");
 	assert_true(called_decommit, "Expected decommit call");
 	assert_true(called_purge_lazy, "Expected purge_lazy call");
 	assert_true(called_purge_forced, "Expected purge_forced call");
 
 	try_dalloc = true;
+	try_destroy = true;
 	try_decommit = true;
 	try_purge_lazy = true;
 	try_purge_forced = true;

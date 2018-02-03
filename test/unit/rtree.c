@@ -1,20 +1,25 @@
 #include "test/jemalloc_test.h"
 
+#include "jemalloc/internal/rtree.h"
+
 rtree_node_alloc_t *rtree_node_alloc_orig;
 rtree_node_dalloc_t *rtree_node_dalloc_orig;
+rtree_leaf_alloc_t *rtree_leaf_alloc_orig;
+rtree_leaf_dalloc_t *rtree_leaf_dalloc_orig;
 
-rtree_t *test_rtree;
+/* Potentially too large to safely place on the stack. */
+rtree_t test_rtree;
 
-static rtree_elm_t *
+static rtree_node_elm_t *
 rtree_node_alloc_intercept(tsdn_t *tsdn, rtree_t *rtree, size_t nelms) {
-	rtree_elm_t *node;
+	rtree_node_elm_t *node;
 
-	if (rtree != test_rtree) {
+	if (rtree != &test_rtree) {
 		return rtree_node_alloc_orig(tsdn, rtree, nelms);
 	}
 
 	malloc_mutex_unlock(tsdn, &rtree->init_lock);
-	node = (rtree_elm_t *)calloc(nelms, sizeof(rtree_elm_t));
+	node = (rtree_node_elm_t *)calloc(nelms, sizeof(rtree_node_elm_t));
 	assert_ptr_not_null(node, "Unexpected calloc() failure");
 	malloc_mutex_lock(tsdn, &rtree->init_lock);
 
@@ -22,8 +27,9 @@ rtree_node_alloc_intercept(tsdn_t *tsdn, rtree_t *rtree, size_t nelms) {
 }
 
 static void
-rtree_node_dalloc_intercept(tsdn_t *tsdn, rtree_t *rtree, rtree_elm_t *node) {
-	if (rtree != test_rtree) {
+rtree_node_dalloc_intercept(tsdn_t *tsdn, rtree_t *rtree,
+    rtree_node_elm_t *node) {
+	if (rtree != &test_rtree) {
 		rtree_node_dalloc_orig(tsdn, rtree, node);
 		return;
 	}
@@ -31,96 +37,45 @@ rtree_node_dalloc_intercept(tsdn_t *tsdn, rtree_t *rtree, rtree_elm_t *node) {
 	free(node);
 }
 
+static rtree_leaf_elm_t *
+rtree_leaf_alloc_intercept(tsdn_t *tsdn, rtree_t *rtree, size_t nelms) {
+	rtree_leaf_elm_t *leaf;
+
+	if (rtree != &test_rtree) {
+		return rtree_leaf_alloc_orig(tsdn, rtree, nelms);
+	}
+
+	malloc_mutex_unlock(tsdn, &rtree->init_lock);
+	leaf = (rtree_leaf_elm_t *)calloc(nelms, sizeof(rtree_leaf_elm_t));
+	assert_ptr_not_null(leaf, "Unexpected calloc() failure");
+	malloc_mutex_lock(tsdn, &rtree->init_lock);
+
+	return leaf;
+}
+
+static void
+rtree_leaf_dalloc_intercept(tsdn_t *tsdn, rtree_t *rtree,
+    rtree_leaf_elm_t *leaf) {
+	if (rtree != &test_rtree) {
+		rtree_leaf_dalloc_orig(tsdn, rtree, leaf);
+		return;
+	}
+
+	free(leaf);
+}
+
 TEST_BEGIN(test_rtree_read_empty) {
 	tsdn_t *tsdn;
 
 	tsdn = tsdn_fetch();
 
-	rtree_t rtree;
-	rtree_ctx_t rtree_ctx = RTREE_CTX_INITIALIZER;
-	test_rtree = &rtree;
-	assert_false(rtree_new(&rtree), "Unexpected rtree_new() failure");
-	assert_ptr_null(rtree_read(tsdn, &rtree, &rtree_ctx, PAGE, false),
-	    "rtree_read() should return NULL for empty tree");
-	rtree_delete(tsdn, &rtree);
-	test_rtree = NULL;
-}
-TEST_END
-
-#define NTHREADS	8
-#define MAX_NBITS	30
-#define NITERS		1000
-#define SEED		42
-
-typedef struct {
-	rtree_t		rtree;
-	uint32_t	seed;
-} thd_start_arg_t;
-
-static void *
-thd_start(void *varg) {
-	thd_start_arg_t *arg = (thd_start_arg_t *)varg;
-	rtree_ctx_t rtree_ctx = RTREE_CTX_INITIALIZER;
-	sfmt_t *sfmt;
-	extent_t *extent;
-	tsdn_t *tsdn;
-	unsigned i;
-
-	sfmt = init_gen_rand(arg->seed);
-	extent = (extent_t *)malloc(sizeof(extent));
-	assert_ptr_not_null(extent, "Unexpected malloc() failure");
-	tsdn = tsdn_fetch();
-
-	for (i = 0; i < NITERS; i++) {
-		uintptr_t key = (uintptr_t)(gen_rand64(sfmt) & ((ZU(1) <<
-		    MAX_NBITS) - ZU(1)));
-		if (i % 2 == 0) {
-			rtree_elm_t *elm;
-
-			elm = rtree_elm_acquire(tsdn, &arg->rtree, &rtree_ctx,
-			    key, false, true);
-			assert_ptr_not_null(elm,
-			    "Unexpected rtree_elm_acquire() failure");
-			rtree_elm_write_acquired(tsdn, &arg->rtree, elm,
-			    extent);
-			rtree_elm_release(tsdn, &arg->rtree, elm);
-
-			elm = rtree_elm_acquire(tsdn, &arg->rtree, &rtree_ctx,
-			    key, true, false);
-			assert_ptr_not_null(elm,
-			    "Unexpected rtree_elm_acquire() failure");
-			rtree_elm_read_acquired(tsdn, &arg->rtree, elm);
-			rtree_elm_release(tsdn, &arg->rtree, elm);
-		} else {
-			rtree_read(tsdn, &arg->rtree, &rtree_ctx, key, false);
-		}
-	}
-
-	free(extent);
-	fini_gen_rand(sfmt);
-	return NULL;
-}
-
-TEST_BEGIN(test_rtree_concurrent) {
-	thd_start_arg_t arg;
-	thd_t thds[NTHREADS];
-	sfmt_t *sfmt;
-	tsdn_t *tsdn;
-
-	sfmt = init_gen_rand(SEED);
-	tsdn = tsdn_fetch();
-	test_rtree = &arg.rtree;
-	assert_false(rtree_new(&arg.rtree), "Unexpected rtree_new() failure");
-	arg.seed = gen_rand32(sfmt);
-	for (unsigned i = 0; i < NTHREADS; i++) {
-		thd_create(&thds[i], thd_start, (void *)&arg);
-	}
-	for (unsigned i = 0; i < NTHREADS; i++) {
-		thd_join(thds[i], NULL);
-	}
-	rtree_delete(tsdn, &arg.rtree);
-	test_rtree = NULL;
-	fini_gen_rand(sfmt);
+	rtree_t *rtree = &test_rtree;
+	rtree_ctx_t rtree_ctx;
+	rtree_ctx_data_init(&rtree_ctx);
+	assert_false(rtree_new(rtree, false), "Unexpected rtree_new() failure");
+	assert_ptr_null(rtree_extent_read(tsdn, rtree, &rtree_ctx, PAGE,
+	    false), "rtree_extent_read() should return NULL for empty tree");
+	rtree_delete(tsdn, rtree);
 }
 TEST_END
 
@@ -130,29 +85,36 @@ TEST_END
 
 TEST_BEGIN(test_rtree_extrema) {
 	extent_t extent_a, extent_b;
-	tsdn_t *tsdn;
+	extent_init(&extent_a, NULL, NULL, LARGE_MINCLASS, false,
+	    sz_size2index(LARGE_MINCLASS), 0, extent_state_active, false,
+	    false, true);
+	extent_init(&extent_b, NULL, NULL, 0, false, NSIZES, 0,
+	    extent_state_active, false, false, true);
 
-	tsdn = tsdn_fetch();
+	tsdn_t *tsdn = tsdn_fetch();
 
-	rtree_t rtree;
-	rtree_ctx_t rtree_ctx = RTREE_CTX_INITIALIZER;
-	test_rtree = &rtree;
-	assert_false(rtree_new(&rtree), "Unexpected rtree_new() failure");
+	rtree_t *rtree = &test_rtree;
+	rtree_ctx_t rtree_ctx;
+	rtree_ctx_data_init(&rtree_ctx);
+	assert_false(rtree_new(rtree, false), "Unexpected rtree_new() failure");
 
-	assert_false(rtree_write(tsdn, &rtree, &rtree_ctx, PAGE, &extent_a),
+	assert_false(rtree_write(tsdn, rtree, &rtree_ctx, PAGE, &extent_a,
+	    extent_szind_get(&extent_a), extent_slab_get(&extent_a)),
 	    "Unexpected rtree_write() failure");
-	assert_ptr_eq(rtree_read(tsdn, &rtree, &rtree_ctx, PAGE, true),
+	rtree_szind_slab_update(tsdn, rtree, &rtree_ctx, PAGE,
+	    extent_szind_get(&extent_a), extent_slab_get(&extent_a));
+	assert_ptr_eq(rtree_extent_read(tsdn, rtree, &rtree_ctx, PAGE, true),
 	    &extent_a,
-	    "rtree_read() should return previously set value");
+	    "rtree_extent_read() should return previously set value");
 
-	assert_false(rtree_write(tsdn, &rtree, &rtree_ctx, ~((uintptr_t)0),
-	    &extent_b), "Unexpected rtree_write() failure");
-	assert_ptr_eq(rtree_read(tsdn, &rtree, &rtree_ctx, ~((uintptr_t)0),
-	    true), &extent_b,
-	    "rtree_read() should return previously set value");
+	assert_false(rtree_write(tsdn, rtree, &rtree_ctx, ~((uintptr_t)0),
+	    &extent_b, extent_szind_get_maybe_invalid(&extent_b),
+	    extent_slab_get(&extent_b)), "Unexpected rtree_write() failure");
+	assert_ptr_eq(rtree_extent_read(tsdn, rtree, &rtree_ctx,
+	    ~((uintptr_t)0), true), &extent_b,
+	    "rtree_extent_read() should return previously set value");
 
-	rtree_delete(tsdn, &rtree);
-	test_rtree = NULL;
+	rtree_delete(tsdn, rtree);
 }
 TEST_END
 
@@ -163,32 +125,33 @@ TEST_BEGIN(test_rtree_bits) {
 	    PAGE + (((uintptr_t)1) << LG_PAGE) - 1};
 
 	extent_t extent;
-	rtree_t rtree;
-	rtree_ctx_t rtree_ctx = RTREE_CTX_INITIALIZER;
+	extent_init(&extent, NULL, NULL, 0, false, NSIZES, 0,
+	    extent_state_active, false, false, true);
 
-	test_rtree = &rtree;
-	assert_false(rtree_new(&rtree),
-	    "Unexpected rtree_new() failure");
+	rtree_t *rtree = &test_rtree;
+	rtree_ctx_t rtree_ctx;
+	rtree_ctx_data_init(&rtree_ctx);
+	assert_false(rtree_new(rtree, false), "Unexpected rtree_new() failure");
 
 	for (unsigned i = 0; i < sizeof(keys)/sizeof(uintptr_t); i++) {
-		assert_false(rtree_write(tsdn, &rtree, &rtree_ctx, keys[i],
-		    &extent), "Unexpected rtree_write() failure");
+		assert_false(rtree_write(tsdn, rtree, &rtree_ctx, keys[i],
+		    &extent, NSIZES, false),
+		    "Unexpected rtree_write() failure");
 		for (unsigned j = 0; j < sizeof(keys)/sizeof(uintptr_t); j++) {
-			assert_ptr_eq(rtree_read(tsdn, &rtree, &rtree_ctx,
+			assert_ptr_eq(rtree_extent_read(tsdn, rtree, &rtree_ctx,
 			    keys[j], true), &extent,
-			    "rtree_read() should return previously set "
-			    "value and ignore insignificant key bits; "
-			    "i=%u, j=%u, set key=%#"FMTxPTR", get "
-			    "key=%#"FMTxPTR, i, j, keys[i], keys[j]);
+			    "rtree_extent_read() should return previously set "
+			    "value and ignore insignificant key bits; i=%u, "
+			    "j=%u, set key=%#"FMTxPTR", get key=%#"FMTxPTR, i,
+			    j, keys[i], keys[j]);
 		}
-		assert_ptr_null(rtree_read(tsdn, &rtree, &rtree_ctx,
+		assert_ptr_null(rtree_extent_read(tsdn, rtree, &rtree_ctx,
 		    (((uintptr_t)2) << LG_PAGE), false),
 		    "Only leftmost rtree leaf should be set; i=%u", i);
-		rtree_clear(tsdn, &rtree, &rtree_ctx, keys[i]);
+		rtree_clear(tsdn, rtree, &rtree_ctx, keys[i]);
 	}
 
-	rtree_delete(tsdn, &rtree);
-	test_rtree = NULL;
+	rtree_delete(tsdn, rtree);
 }
 TEST_END
 
@@ -198,44 +161,47 @@ TEST_BEGIN(test_rtree_random) {
 	sfmt_t *sfmt = init_gen_rand(SEED);
 	tsdn_t *tsdn = tsdn_fetch();
 	uintptr_t keys[NSET];
-	extent_t extent;
-	rtree_t rtree;
-	rtree_ctx_t rtree_ctx = RTREE_CTX_INITIALIZER;
-	rtree_elm_t *elm;
+	rtree_t *rtree = &test_rtree;
+	rtree_ctx_t rtree_ctx;
+	rtree_ctx_data_init(&rtree_ctx);
 
-	test_rtree = &rtree;
-	assert_false(rtree_new(&rtree), "Unexpected rtree_new() failure");
+	extent_t extent;
+	extent_init(&extent, NULL, NULL, 0, false, NSIZES, 0,
+	    extent_state_active, false, false, true);
+
+	assert_false(rtree_new(rtree, false), "Unexpected rtree_new() failure");
 
 	for (unsigned i = 0; i < NSET; i++) {
 		keys[i] = (uintptr_t)gen_rand64(sfmt);
-		elm = rtree_elm_acquire(tsdn, &rtree, &rtree_ctx, keys[i],
-		    false, true);
+		rtree_leaf_elm_t *elm = rtree_leaf_elm_lookup(tsdn, rtree,
+		    &rtree_ctx, keys[i], false, true);
 		assert_ptr_not_null(elm,
-		    "Unexpected rtree_elm_acquire() failure");
-		rtree_elm_write_acquired(tsdn, &rtree, elm, &extent);
-		rtree_elm_release(tsdn, &rtree, elm);
-		assert_ptr_eq(rtree_read(tsdn, &rtree, &rtree_ctx, keys[i],
-		    true), &extent,
-		    "rtree_read() should return previously set value");
+		    "Unexpected rtree_leaf_elm_lookup() failure");
+		rtree_leaf_elm_write(tsdn, rtree, elm, &extent, NSIZES, false);
+		assert_ptr_eq(rtree_extent_read(tsdn, rtree, &rtree_ctx,
+		    keys[i], true), &extent,
+		    "rtree_extent_read() should return previously set value");
 	}
 	for (unsigned i = 0; i < NSET; i++) {
-		assert_ptr_eq(rtree_read(tsdn, &rtree, &rtree_ctx, keys[i],
-		    true), &extent,
-		    "rtree_read() should return previously set value, i=%u", i);
+		assert_ptr_eq(rtree_extent_read(tsdn, rtree, &rtree_ctx,
+		    keys[i], true), &extent,
+		    "rtree_extent_read() should return previously set value, "
+		    "i=%u", i);
 	}
 
 	for (unsigned i = 0; i < NSET; i++) {
-		rtree_clear(tsdn, &rtree, &rtree_ctx, keys[i]);
-		assert_ptr_null(rtree_read(tsdn, &rtree, &rtree_ctx, keys[i],
-		    true), "rtree_read() should return previously set value");
+		rtree_clear(tsdn, rtree, &rtree_ctx, keys[i]);
+		assert_ptr_null(rtree_extent_read(tsdn, rtree, &rtree_ctx,
+		    keys[i], true),
+		   "rtree_extent_read() should return previously set value");
 	}
 	for (unsigned i = 0; i < NSET; i++) {
-		assert_ptr_null(rtree_read(tsdn, &rtree, &rtree_ctx, keys[i],
-		    true), "rtree_read() should return previously set value");
+		assert_ptr_null(rtree_extent_read(tsdn, rtree, &rtree_ctx,
+		    keys[i], true),
+		    "rtree_extent_read() should return previously set value");
 	}
 
-	rtree_delete(tsdn, &rtree);
-	test_rtree = NULL;
+	rtree_delete(tsdn, rtree);
 	fini_gen_rand(sfmt);
 #undef NSET
 #undef SEED
@@ -248,11 +214,13 @@ main(void) {
 	rtree_node_alloc = rtree_node_alloc_intercept;
 	rtree_node_dalloc_orig = rtree_node_dalloc;
 	rtree_node_dalloc = rtree_node_dalloc_intercept;
-	test_rtree = NULL;
+	rtree_leaf_alloc_orig = rtree_leaf_alloc;
+	rtree_leaf_alloc = rtree_leaf_alloc_intercept;
+	rtree_leaf_dalloc_orig = rtree_leaf_dalloc;
+	rtree_leaf_dalloc = rtree_leaf_dalloc_intercept;
 
 	return test(
 	    test_rtree_read_empty,
-	    test_rtree_concurrent,
 	    test_rtree_extrema,
 	    test_rtree_bits,
 	    test_rtree_random);

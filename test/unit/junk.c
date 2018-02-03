@@ -1,12 +1,6 @@
 #include "test/jemalloc_test.h"
 
-#ifdef JEMALLOC_FILL
-#  ifndef JEMALLOC_TEST_JUNK_OPT
-#    define JEMALLOC_TEST_JUNK_OPT "junk:true"
-#  endif
-const char *malloc_conf =
-    "abort:false,zero:false," JEMALLOC_TEST_JUNK_OPT;
-#endif
+#include "jemalloc/internal/util.h"
 
 static arena_dalloc_junk_small_t *arena_dalloc_junk_small_orig;
 static large_dalloc_junk_t *large_dalloc_junk_orig;
@@ -21,7 +15,7 @@ watch_junking(void *p) {
 }
 
 static void
-arena_dalloc_junk_small_intercept(void *ptr, const arena_bin_info_t *bin_info) {
+arena_dalloc_junk_small_intercept(void *ptr, const bin_info_t *bin_info) {
 	size_t i;
 
 	arena_dalloc_junk_small_orig(ptr, bin_info);
@@ -102,12 +96,15 @@ test_junk(size_t sz_min, size_t sz_max) {
 			t = (uint8_t *)rallocx(s, sz+1, 0);
 			assert_ptr_not_null((void *)t,
 			    "Unexpected rallocx() failure");
-			assert_ptr_ne(s, t, "Unexpected in-place rallocx()");
 			assert_zu_ge(sallocx(t, 0), sz+1,
 			    "Unexpectedly small rallocx() result");
-			assert_true(!opt_junk_free || saw_junking,
-			    "Expected region of size %zu to be junk-filled",
-			    sz);
+			if (!background_thread_enabled()) {
+				assert_ptr_ne(s, t,
+				    "Unexpected in-place rallocx()");
+				assert_true(!opt_junk_free || saw_junking,
+				    "Expected region of size %zu to be "
+				    "junk-filled", sz);
+			}
 			s = t;
 		}
 	}

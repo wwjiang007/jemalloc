@@ -410,6 +410,8 @@ for (i = 0; i < nbins; i++) {
 	/* Do something with bin_size... */
 }]]></programlisting></para>
 
+      <varlistentry id="malloc_stats_print_opts">
+      </varlistentry>
       <para>The <function>malloc_stats_print()</function> function writes
       summary statistics via the <parameter>write_cb</parameter> callback
       function pointer and <parameter>cbopaque</parameter> data passed to
@@ -430,7 +432,8 @@ for (i = 0; i < nbins; i++) {
       can be specified to omit merged arena, destroyed merged arena, and per
       arena statistics, respectively; <quote>b</quote> and <quote>l</quote> can
       be specified to omit per size class statistics for bins and large objects,
-      respectively.  Unrecognized characters are silently ignored.  Note that
+      respectively; <quote>x</quote> can be specified to omit all mutex
+      statistics.  Unrecognized characters are silently ignored.  Note that
       thread caching may prevent some statistics from being completely up to
       date, since extra locking would be required to merge counters that track
       thread cache operations.</para>
@@ -509,13 +512,12 @@ for (i = 0; i < nbins; i++) {
     sense to reduce the number of arenas if an application does not make much
     use of the allocation functions.</para>
 
-    <para>In addition to multiple arenas, unless
-    <option>--disable-tcache</option> is specified during configuration, this
-    allocator supports thread-specific caching, in order to make it possible to
-    completely avoid synchronization for most allocation requests.  Such caching
-    allows very fast allocation in the common case, but it increases memory
-    usage and fragmentation, since a bounded number of objects can remain
-    allocated in each thread cache.</para>
+    <para>In addition to multiple arenas, this allocator supports
+    thread-specific caching, in order to make it possible to completely avoid
+    synchronization for most allocation requests.  Such caching allows very fast
+    allocation in the common case, but it increases memory usage and
+    fragmentation, since a bounded number of objects can remain allocated in
+    each thread cache.</para>
 
     <para>Memory is conceptually broken into extents.  Extents are always
     aligned to multiples of the page size.  This alignment makes it possible to
@@ -737,6 +739,28 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         detecting whether another thread caused a refresh.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="background_thread">
+        <term>
+          <mallctl>background_thread</mallctl>
+          (<type>bool</type>)
+          <literal>rw</literal>
+        </term>
+        <listitem><para>Enable/disable internal background worker threads.  When
+        set to true, background threads are created on demand (the number of
+        background threads will be no more than the number of CPUs or active
+        arenas).  Threads run periodically, and handle <link
+        linkend="arena.i.decay">purging</link> asynchronously.  When switching
+        off, background threads are terminated synchronously.  Note that after
+        <citerefentry><refentrytitle>fork</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+        function, the state in the child process will be disabled regardless
+        the state in parent process. See <link
+        linkend="stats.background_thread.num_threads"><mallctl>stats.background_thread</mallctl></link>
+        for related stats.  <link
+        linkend="opt.background_thread"><mallctl>opt.background_thread</mallctl></link>
+        can be used to set the default option.  This option is only available on
+        selected pthread-based platforms.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="config.cache_oblivious">
         <term>
           <mallctl>config.cache_oblivious</mallctl>
@@ -788,16 +812,6 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         during build configuration.</para></listitem>
       </varlistentry>
 
-      <varlistentry id="config.munmap">
-        <term>
-          <mallctl>config.munmap</mallctl>
-          (<type>bool</type>)
-          <literal>r-</literal>
-        </term>
-        <listitem><para><option>--enable-munmap</option> was specified during
-        build configuration.</para></listitem>
-      </varlistentry>
-
       <varlistentry id="config.prof">
         <term>
           <mallctl>config.prof</mallctl>
@@ -838,24 +852,15 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         build configuration.</para></listitem>
       </varlistentry>
 
-      <varlistentry id="config.tcache">
+      <varlistentry id="config.thp">
         <term>
-          <mallctl>config.tcache</mallctl>
+          <mallctl>config.thp</mallctl>
           (<type>bool</type>)
           <literal>r-</literal>
         </term>
-        <listitem><para><option>--disable-tcache</option> was not specified
-        during build configuration.</para></listitem>
-      </varlistentry>
-
-      <varlistentry id="config.tls">
-        <term>
-          <mallctl>config.tls</mallctl>
-          (<type>bool</type>)
-          <literal>r-</literal>
-        </term>
-        <listitem><para><option>--disable-tls</option> was not specified during
-        build configuration.</para></listitem>
+        <listitem><para><option>--disable-thp</option> was not specified
+        during build configuration, and the system supports transparent huge
+        page manipulation.</para></listitem>
       </varlistentry>
 
       <varlistentry id="config.utrace">
@@ -885,11 +890,66 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
           <literal>r-</literal>
         </term>
         <listitem><para>Abort-on-warning enabled/disabled.  If true, most
-        warnings are fatal.  The process will call
+        warnings are fatal.  Note that runtime option warnings are not included
+        (see <link
+        linkend="opt.abort_conf"><mallctl>opt.abort_conf</mallctl></link> for
+        that). The process will call
         <citerefentry><refentrytitle>abort</refentrytitle>
         <manvolnum>3</manvolnum></citerefentry> in these cases.  This option is
         disabled by default unless <option>--enable-debug</option> is
         specified during configuration, in which case it is enabled by default.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.abort_conf">
+        <term>
+          <mallctl>opt.abort_conf</mallctl>
+          (<type>bool</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Abort-on-invalid-configuration enabled/disabled.  If
+        true, invalid runtime options are fatal.  The process will call
+        <citerefentry><refentrytitle>abort</refentrytitle>
+        <manvolnum>3</manvolnum></citerefentry> in these cases.  This option is
+        disabled by default unless <option>--enable-debug</option> is
+        specified during configuration, in which case it is enabled by default.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.metadata_thp">
+        <term>
+          <mallctl>opt.metadata_thp</mallctl>
+          (<type>const char *</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Controls whether to allow jemalloc to use transparent
+        huge page (THP) for internal metadata (see <link
+        linkend="stats.metadata">stats.metadata</link>).  <quote>always</quote>
+        allows such usage.  <quote>auto</quote> uses no THP initially, but may
+        begin to do so when metadata usage reaches certain level.  The default
+        is <quote>disabled</quote>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.retain">
+        <term>
+          <mallctl>opt.retain</mallctl>
+          (<type>bool</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>If true, retain unused virtual memory for later reuse
+        rather than discarding it by calling
+        <citerefentry><refentrytitle>munmap</refentrytitle>
+        <manvolnum>2</manvolnum></citerefentry> or equivalent (see <link
+        linkend="stats.retained">stats.retained</link> for related details).
+        This option is disabled by default unless discarding virtual memory is
+        known to trigger
+        platform-specific performance problems, e.g. for [64-bit] Linux, which
+        has a quirk in its virtual memory allocation algorithm that causes
+        semi-permanent VM map holes under normal jemalloc operation.  Although
+        <citerefentry><refentrytitle>munmap</refentrytitle>
+        <manvolnum>2</manvolnum></citerefentry> causes issues on 32-bit Linux as
+        well, retaining virtual memory for 32-bit Linux is disabled by default
+        due to the practical possibility of address space exhaustion.
         </para></listitem>
       </varlistentry>
 
@@ -926,24 +986,103 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         number of CPUs, or one if there is a single CPU.</para></listitem>
       </varlistentry>
 
-      <varlistentry id="opt.decay_time">
+      <varlistentry id="opt.percpu_arena">
         <term>
-          <mallctl>opt.decay_time</mallctl>
+          <mallctl>opt.percpu_arena</mallctl>
+          (<type>const char *</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Per CPU arena mode.  Use the <quote>percpu</quote>
+        setting to enable this feature, which uses number of CPUs to determine
+        number of arenas, and bind threads to arenas dynamically based on the
+        CPU the thread runs on currently.  <quote>phycpu</quote> setting uses
+        one arena per physical CPU, which means the two hyper threads on the
+        same CPU share one arena.  Note that no runtime checking regarding the
+        availability of hyper threading is done at the moment.  When set to
+        <quote>disabled</quote>, narenas and thread to arena association will
+        not be impacted by this option.  The default is <quote>disabled</quote>.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.background_thread">
+        <term>
+          <mallctl>opt.background_thread</mallctl>
+          (<type>const bool</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Internal background worker threads enabled/disabled.
+        Because of potential circular dependencies, enabling background thread
+        using this option may cause crash or deadlock during initialization. For
+        a reliable way to use this feature, see <link
+        linkend="background_thread">background_thread</link> for dynamic control
+        options and details.  This option is disabled by
+        default.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.dirty_decay_ms">
+        <term>
+          <mallctl>opt.dirty_decay_ms</mallctl>
           (<type>ssize_t</type>)
           <literal>r-</literal>
         </term>
-        <listitem><para>Approximate time in seconds from the creation of a set
-        of unused dirty pages until an equivalent set of unused dirty pages is
-        purged and/or reused.  The pages are incrementally purged according to a
-        sigmoidal decay curve that starts and ends with zero purge rate.  A
-        decay time of 0 causes all unused dirty pages to be purged immediately
-        upon creation.  A decay time of -1 disables purging.  The default decay
-        time is 10 seconds.  See <link
-        linkend="arenas.decay_time"><mallctl>arenas.decay_time</mallctl></link>
+        <listitem><para>Approximate time in milliseconds from the creation of a
+        set of unused dirty pages until an equivalent set of unused dirty pages
+        is purged (i.e. converted to muzzy via e.g.
+        <function>madvise(<parameter>...</parameter><parameter><constant>MADV_FREE</constant></parameter>)</function>
+        if supported by the operating system, or converted to clean otherwise)
+        and/or reused.  Dirty pages are defined as previously having been
+        potentially written to by the application, and therefore consuming
+        physical memory, yet having no current use.  The pages are incrementally
+        purged according to a sigmoidal decay curve that starts and ends with
+        zero purge rate.  A decay time of 0 causes all unused dirty pages to be
+        purged immediately upon creation.  A decay time of -1 disables purging.
+        The default decay time is 10 seconds.  See <link
+        linkend="arenas.dirty_decay_ms"><mallctl>arenas.dirty_decay_ms</mallctl></link>
         and <link
-        linkend="arena.i.decay_time"><mallctl>arena.&lt;i&gt;.decay_time</mallctl></link>
-        for related dynamic control options.
-        </para></listitem>
+        linkend="arena.i.dirty_decay_ms"><mallctl>arena.&lt;i&gt;.dirty_decay_ms</mallctl></link>
+        for related dynamic control options.  See <link
+        linkend="opt.muzzy_decay_ms"><mallctl>opt.muzzy_decay_ms</mallctl></link>
+        for a description of muzzy pages.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.muzzy_decay_ms">
+        <term>
+          <mallctl>opt.muzzy_decay_ms</mallctl>
+          (<type>ssize_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Approximate time in milliseconds from the creation of a
+        set of unused muzzy pages until an equivalent set of unused muzzy pages
+        is purged (i.e. converted to clean) and/or reused.  Muzzy pages are
+        defined as previously having been unused dirty pages that were
+        subsequently purged in a manner that left them subject to the
+        reclamation whims of the operating system (e.g.
+        <function>madvise(<parameter>...</parameter><parameter><constant>MADV_FREE</constant></parameter>)</function>),
+        and therefore in an indeterminate state.  The pages are incrementally
+        purged according to a sigmoidal decay curve that starts and ends with
+        zero purge rate.  A decay time of 0 causes all unused muzzy pages to be
+        purged immediately upon creation.  A decay time of -1 disables purging.
+        The default decay time is 10 seconds.  See <link
+        linkend="arenas.muzzy_decay_ms"><mallctl>arenas.muzzy_decay_ms</mallctl></link>
+        and <link
+        linkend="arena.i.muzzy_decay_ms"><mallctl>arena.&lt;i&gt;.muzzy_decay_ms</mallctl></link>
+        for related dynamic control options.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.lg_extent_max_active_fit">
+        <term>
+          <mallctl>opt.lg_extent_max_active_fit</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>When reusing dirty extents, this determines the (log
+        base 2 of the) maximum ratio between the size of the active extent
+        selected (to split off from) and the size of the requested allocation.
+        This prevents the splitting of large active extents for smaller
+        allocations, which can reduce fragmentation over the long run
+        (especially for non-active extents).  Lower value may reduce
+        fragmentation, at the cost of extra active extents.  The default value
+        is 6, which gives a maximum ratio of 64 (2^6).</para></listitem>
       </varlistentry>
 
       <varlistentry id="opt.stats_print">
@@ -956,7 +1095,9 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         enabled, the <function>malloc_stats_print()</function>
         function is called at program exit via an
         <citerefentry><refentrytitle>atexit</refentrytitle>
-        <manvolnum>3</manvolnum></citerefentry> function.  If
+        <manvolnum>3</manvolnum></citerefentry> function.  <link
+        linkend="opt.stats_print_opts"><mallctl>opt.stats_print_opts</mallctl></link>
+        can be combined to specify output options. If
         <option>--enable-stats</option> is specified during configuration, this
         has the potential to cause deadlock for a multi-threaded process that
         exits while one or more threads are executing in the memory allocation
@@ -969,6 +1110,23 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         functionality).  Therefore, this option should only be used with care;
         it is primarily intended as a performance tuning aid during application
         development.  This option is disabled by default.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.stats_print_opts">
+        <term>
+          <mallctl>opt.stats_print_opts</mallctl>
+          (<type>const char *</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Options (the <parameter>opts</parameter> string) to pass
+        to the <function>malloc_stats_print()</function> at exit (enabled
+        through <link
+        linkend="opt.stats_print"><mallctl>opt.stats_print</mallctl></link>). See
+        available options in <link
+        linkend="malloc_stats_print_opts"><function>malloc_stats_print()</function></link>.
+        Has no effect unless <link
+        linkend="opt.stats_print"><mallctl>opt.stats_print</mallctl></link> is
+        enabled.  The default is <quote></quote>.</para></listitem>
       </varlistentry>
 
       <varlistentry id="opt.junk">
@@ -1046,7 +1204,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
           <mallctl>opt.tcache</mallctl>
           (<type>bool</type>)
           <literal>r-</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Thread-specific caching (tcache) enabled/disabled.  When
         there are multiple threads, each thread uses a tcache for objects up to
@@ -1063,7 +1220,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
           <mallctl>opt.lg_tcache_max</mallctl>
           (<type>size_t</type>)
           <literal>r-</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Maximum size class (log base 2) to cache in the
         thread-specific cache (tcache).  At a minimum, all small size classes
@@ -1321,7 +1477,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
           <mallctl>thread.tcache.enabled</mallctl>
           (<type>bool</type>)
           <literal>rw</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Enable/disable calling thread's tcache.  The tcache is
         implicitly flushed as a side effect of becoming
@@ -1335,7 +1490,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
           <mallctl>thread.tcache.flush</mallctl>
           (<type>void</type>)
           <literal>--</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Flush calling thread's thread-specific cache (tcache).
         This interface releases all cached objects and internal data structures
@@ -1391,7 +1545,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
           <mallctl>tcache.create</mallctl>
           (<type>unsigned</type>)
           <literal>r-</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Create an explicit thread-specific cache (tcache) and
         return an identifier that can be passed to the <link
@@ -1408,7 +1561,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
           <mallctl>tcache.flush</mallctl>
           (<type>unsigned</type>)
           <literal>-w</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Flush the specified thread-specific cache (tcache).  The
         same considerations apply to this interface as to <link
@@ -1422,7 +1574,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
           <mallctl>tcache.destroy</mallctl>
           (<type>unsigned</type>)
           <literal>-w</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Flush the specified thread-specific cache (tcache) and
         make the identifier available for use during a future tcache creation.
@@ -1442,6 +1593,22 @@ malloc_conf = "xmalloc:true";]]></programlisting>
         initialized (always true).</para></listitem>
       </varlistentry>
 
+      <varlistentry id="arena.i.decay">
+        <term>
+          <mallctl>arena.&lt;i&gt;.decay</mallctl>
+          (<type>void</type>)
+          <literal>--</literal>
+        </term>
+        <listitem><para>Trigger decay-based purging of unused dirty/muzzy pages
+        for arena &lt;i&gt;, or for all arenas if &lt;i&gt; equals
+        <constant>MALLCTL_ARENAS_ALL</constant>.  The proportion of unused
+        dirty/muzzy pages to be purged depends on the current time; see <link
+        linkend="opt.dirty_decay_ms"><mallctl>opt.dirty_decay_ms</mallctl></link>
+        and <link
+        linkend="opt.muzzy_decay_ms"><mallctl>opt.muzy_decay_ms</mallctl></link>
+        for details.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="arena.i.purge">
         <term>
           <mallctl>arena.&lt;i&gt;.purge</mallctl>
@@ -1451,20 +1618,6 @@ malloc_conf = "xmalloc:true";]]></programlisting>
         <listitem><para>Purge all unused dirty pages for arena &lt;i&gt;, or for
         all arenas if &lt;i&gt; equals <constant>MALLCTL_ARENAS_ALL</constant>.
         </para></listitem>
-      </varlistentry>
-
-      <varlistentry id="arena.i.decay">
-        <term>
-          <mallctl>arena.&lt;i&gt;.decay</mallctl>
-          (<type>void</type>)
-          <literal>--</literal>
-        </term>
-        <listitem><para>Trigger decay-based purging of unused dirty pages for
-        arena &lt;i&gt;, or for all arenas if &lt;i&gt; equals
-        <constant>MALLCTL_ARENAS_ALL</constant>.  The proportion of unused dirty
-        pages to be purged depends on the current time; see <link
-        linkend="opt.decay_time"><mallctl>opt.decay_time</mallctl></link> for
-        details.</para></listitem>
       </varlistentry>
 
       <varlistentry id="arena.i.reset">
@@ -1514,20 +1667,52 @@ malloc_conf = "xmalloc:true";]]></programlisting>
         settings.</para></listitem>
       </varlistentry>
 
-      <varlistentry id="arena.i.decay_time">
+      <varlistentry id="arena.i.dirty_decay_ms">
         <term>
-          <mallctl>arena.&lt;i&gt;.decay_time</mallctl>
+          <mallctl>arena.&lt;i&gt;.dirty_decay_ms</mallctl>
           (<type>ssize_t</type>)
           <literal>rw</literal>
         </term>
-        <listitem><para>Current per-arena approximate time in seconds from the
-        creation of a set of unused dirty pages until an equivalent set of
+        <listitem><para>Current per-arena approximate time in milliseconds from
+        the creation of a set of unused dirty pages until an equivalent set of
         unused dirty pages is purged and/or reused.  Each time this interface is
         set, all currently unused dirty pages are considered to have fully
         decayed, which causes immediate purging of all unused dirty pages unless
         the decay time is set to -1 (i.e. purging disabled).  See <link
-        linkend="opt.decay_time"><mallctl>opt.decay_time</mallctl></link> for
-        additional information.</para></listitem>
+        linkend="opt.dirty_decay_ms"><mallctl>opt.dirty_decay_ms</mallctl></link>
+        for additional information.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="arena.i.muzzy_decay_ms">
+        <term>
+          <mallctl>arena.&lt;i&gt;.muzzy_decay_ms</mallctl>
+          (<type>ssize_t</type>)
+          <literal>rw</literal>
+        </term>
+        <listitem><para>Current per-arena approximate time in milliseconds from
+        the creation of a set of unused muzzy pages until an equivalent set of
+        unused muzzy pages is purged and/or reused.  Each time this interface is
+        set, all currently unused muzzy pages are considered to have fully
+        decayed, which causes immediate purging of all unused muzzy pages unless
+        the decay time is set to -1 (i.e. purging disabled).  See <link
+        linkend="opt.muzzy_decay_ms"><mallctl>opt.muzzy_decay_ms</mallctl></link>
+        for additional information.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="arena.i.retain_grow_limit">
+        <term>
+          <mallctl>arena.&lt;i&gt;.retain_grow_limit</mallctl>
+          (<type>size_t</type>)
+          <literal>rw</literal>
+        </term>
+        <listitem><para>Maximum size to grow retained region (only relevant when
+        <link linkend="opt.retain"><mallctl>opt.retain</mallctl></link> is
+        enabled).  This controls the maximum increment to expand virtual memory,
+        or allocation through <link
+        linkend="arena.i.extent_hooks"><mallctl>arena.&lt;i&gt;extent_hooks</mallctl></link>.
+        In particular, if customized extent hooks reserve physical memory
+        (e.g. 1G huge pages), this is useful to control the allocation hook's
+        input size.  The default is no limit.</para></listitem>
       </varlistentry>
 
       <varlistentry id="arena.i.extent_hooks">
@@ -1553,6 +1738,7 @@ typedef extent_hooks_s extent_hooks_t;
 struct extent_hooks_s {
 	extent_alloc_t		*alloc;
 	extent_dalloc_t		*dalloc;
+	extent_destroy_t	*destroy;
 	extent_commit_t		*commit;
 	extent_decommit_t	*decommit;
 	extent_purge_t		*purge_lazy;
@@ -1566,7 +1752,7 @@ struct extent_hooks_s {
         mapped committed memory, in the simplest case followed by deallocation.
         However, there are performance and platform reasons to retain extents
         for later reuse.  Cleanup attempts cascade from deallocation to decommit
-        to lazy purging to forced purging, which gives the extent management
+        to forced purging to lazy purging, which gives the extent management
         functions opportunities to reject the most permanent cleanup operations
         in favor of less permanent (and often less costly) operations.  All
         operations except allocation can be universally opted out of by setting
@@ -1630,6 +1816,25 @@ struct extent_hooks_s {
         in which case it will be automatically retained for later reuse.</para>
 
         <funcsynopsis><funcprototype>
+          <funcdef>typedef void <function>(extent_destroy_t)</function></funcdef>
+          <paramdef>extent_hooks_t *<parameter>extent_hooks</parameter></paramdef>
+          <paramdef>void *<parameter>addr</parameter></paramdef>
+          <paramdef>size_t <parameter>size</parameter></paramdef>
+          <paramdef>bool <parameter>committed</parameter></paramdef>
+          <paramdef>unsigned <parameter>arena_ind</parameter></paramdef>
+        </funcprototype></funcsynopsis>
+        <literallayout></literallayout>
+        <para>
+        An extent destruction function conforms to the
+        <type>extent_destroy_t</type> type and unconditionally destroys an
+        extent at given <parameter>addr</parameter> and
+        <parameter>size</parameter> with
+        <parameter>committed</parameter>/decommited memory as indicated, on
+        behalf of arena <parameter>arena_ind</parameter>.  This function may be
+        called to destroy retained extents during arena destruction (see <link
+        linkend="arena.i.destroy"><mallctl>arena.&lt;i&gt;.destroy</mallctl></link>).</para>
+
+        <funcsynopsis><funcprototype>
           <funcdef>typedef bool <function>(extent_commit_t)</function></funcdef>
           <paramdef>extent_hooks_t *<parameter>extent_hooks</parameter></paramdef>
           <paramdef>void *<parameter>addr</parameter></paramdef>
@@ -1689,12 +1894,14 @@ struct extent_hooks_s {
         <parameter>addr</parameter> and <parameter>size</parameter> at
         <parameter>offset</parameter> bytes, extending for
         <parameter>length</parameter> on behalf of arena
-        <parameter>arena_ind</parameter>.  A lazy extent purge function can
-        delay purging indefinitely and leave the pages within the purged virtual
-        memory range in an indeterminite state, whereas a forced extent purge
-        function immediately purges, and the pages within the virtual memory
-        range will be zero-filled the next time they are accessed.  If the
-        function returns true, this indicates failure to purge.</para>
+        <parameter>arena_ind</parameter>.  A lazy extent purge function (e.g.
+        implemented via
+        <function>madvise(<parameter>...</parameter><parameter><constant>MADV_FREE</constant></parameter>)</function>)
+        can delay purging indefinitely and leave the pages within the purged
+        virtual memory range in an indeterminite state, whereas a forced extent
+        purge function immediately purges, and the pages within the virtual
+        memory range will be zero-filled the next time they are accessed.  If
+        the function returns true, this indicates failure to purge.</para>
 
         <funcsynopsis><funcprototype>
           <funcdef>typedef bool <function>(extent_split_t)</function></funcdef>
@@ -1751,19 +1958,36 @@ struct extent_hooks_s {
         <listitem><para>Current limit on number of arenas.</para></listitem>
       </varlistentry>
 
-      <varlistentry id="arenas.decay_time">
+      <varlistentry id="arenas.dirty_decay_ms">
         <term>
-          <mallctl>arenas.decay_time</mallctl>
+          <mallctl>arenas.dirty_decay_ms</mallctl>
           (<type>ssize_t</type>)
           <literal>rw</literal>
         </term>
-        <listitem><para>Current default per-arena approximate time in seconds
-        from the creation of a set of unused dirty pages until an equivalent set
-        of unused dirty pages is purged and/or reused, used to initialize <link
-        linkend="arena.i.decay_time"><mallctl>arena.&lt;i&gt;.decay_time</mallctl></link>
+        <listitem><para>Current default per-arena approximate time in
+        milliseconds from the creation of a set of unused dirty pages until an
+        equivalent set of unused dirty pages is purged and/or reused, used to
+        initialize <link
+        linkend="arena.i.dirty_decay_ms"><mallctl>arena.&lt;i&gt;.dirty_decay_ms</mallctl></link>
         during arena creation.  See <link
-        linkend="opt.decay_time"><mallctl>opt.decay_time</mallctl></link> for
-        additional information.</para></listitem>
+        linkend="opt.dirty_decay_ms"><mallctl>opt.dirty_decay_ms</mallctl></link>
+        for additional information.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="arenas.muzzy_decay_ms">
+        <term>
+          <mallctl>arenas.muzzy_decay_ms</mallctl>
+          (<type>ssize_t</type>)
+          <literal>rw</literal>
+        </term>
+        <listitem><para>Current default per-arena approximate time in
+        milliseconds from the creation of a set of unused muzzy pages until an
+        equivalent set of unused muzzy pages is purged and/or reused, used to
+        initialize <link
+        linkend="arena.i.muzzy_decay_ms"><mallctl>arena.&lt;i&gt;.muzzy_decay_ms</mallctl></link>
+        during arena creation.  See <link
+        linkend="opt.muzzy_decay_ms"><mallctl>opt.muzzy_decay_ms</mallctl></link>
+        for additional information.</para></listitem>
       </varlistentry>
 
       <varlistentry id="arenas.quantum">
@@ -1789,7 +2013,6 @@ struct extent_hooks_s {
           <mallctl>arenas.tcache_max</mallctl>
           (<type>size_t</type>)
           <literal>r-</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Maximum thread-cached size class.</para></listitem>
       </varlistentry>
@@ -1808,7 +2031,6 @@ struct extent_hooks_s {
           <mallctl>arenas.nhbins</mallctl>
           (<type>unsigned</type>)
           <literal>r-</literal>
-          [<option>--enable-tcache</option>]
         </term>
         <listitem><para>Total number of thread cache bin size
         classes.</para></listitem>
@@ -1996,7 +2218,9 @@ struct extent_hooks_s {
         equal to <link
         linkend="stats.allocated"><mallctl>stats.allocated</mallctl></link>.
         This does not include <link linkend="stats.arenas.i.pdirty">
-        <mallctl>stats.arenas.&lt;i&gt;.pdirty</mallctl></link>, nor pages
+        <mallctl>stats.arenas.&lt;i&gt;.pdirty</mallctl></link>,
+        <link linkend="stats.arenas.i.pmuzzy">
+        <mallctl>stats.arenas.&lt;i&gt;.pmuzzy</mallctl></link>, nor pages
         entirely devoted to allocator metadata.</para></listitem>
       </varlistentry>
 
@@ -2012,7 +2236,24 @@ struct extent_hooks_s {
         metadata structures (see <link
         linkend="stats.arenas.i.base"><mallctl>stats.arenas.&lt;i&gt;.base</mallctl></link>)
         and internal allocations (see <link
-        linkend="stats.arenas.i.internal"><mallctl>stats.arenas.&lt;i&gt;.internal</mallctl></link>).</para></listitem>
+        linkend="stats.arenas.i.internal"><mallctl>stats.arenas.&lt;i&gt;.internal</mallctl></link>).
+        Transparent huge page (enabled with <link
+        linkend="opt.metadata_thp">opt.metadata_thp</link>) usage is not
+        considered.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.metadata_thp">
+        <term>
+          <mallctl>stats.metadata_thp</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Number of transparent huge pages (THP) used for
+        metadata.  See <link
+        linkend="stats.metadata"><mallctl>stats.metadata</mallctl></link> and
+        <link linkend="opt.metadata_thp">opt.metadata_thp</link>) for
+        details.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.resident">
@@ -2058,13 +2299,134 @@ struct extent_hooks_s {
         <listitem><para>Total number of bytes in virtual memory mappings that
         were retained rather than being returned to the operating system via
         e.g. <citerefentry><refentrytitle>munmap</refentrytitle>
-        <manvolnum>2</manvolnum></citerefentry>.  Retained virtual memory is
-        typically untouched, decommitted, or purged, so it has no strongly
-        associated physical memory (see <link
+        <manvolnum>2</manvolnum></citerefentry> or similar.  Retained virtual
+        memory is typically untouched, decommitted, or purged, so it has no
+        strongly associated physical memory (see <link
         linkend="arena.i.extent_hooks">extent hooks</link> for details).
         Retained memory is excluded from mapped memory statistics, e.g. <link
         linkend="stats.mapped"><mallctl>stats.mapped</mallctl></link>.
         </para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.background_thread.num_threads">
+        <term>
+          <mallctl>stats.background_thread.num_threads</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para> Number of <link linkend="background_thread">background
+        threads</link> running currently.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.background_thread.num_runs">
+        <term>
+          <mallctl>stats.background_thread.num_runs</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para> Total number of runs from all <link
+        linkend="background_thread">background threads</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.background_thread.run_interval">
+        <term>
+          <mallctl>stats.background_thread.run_interval</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para> Average run interval in nanoseconds of <link
+        linkend="background_thread">background threads</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.mutexes.ctl">
+        <term>
+          <mallctl>stats.mutexes.ctl.{counter};</mallctl>
+          (<type>counter specific type</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>ctl</varname> mutex (global
+        scope; mallctl related).  <mallctl>{counter}</mallctl> is one of the
+        counters below:</para>
+        <varlistentry id="mutex_counters">
+          <listitem><para><varname>num_ops</varname> (<type>uint64_t</type>):
+          Total number of lock acquisition operations on this mutex.</para>
+
+	  <para><varname>num_spin_acq</varname> (<type>uint64_t</type>): Number
+	  of times the mutex was spin-acquired.  When the mutex is currently
+	  locked and cannot be acquired immediately, a short period of
+	  spin-retry within jemalloc will be performed.  Acquired through spin
+	  generally means the contention was lightweight and not causing context
+	  switches.</para>
+
+	  <para><varname>num_wait</varname> (<type>uint64_t</type>): Number of
+	  times the mutex was wait-acquired, which means the mutex contention
+	  was not solved by spin-retry, and blocking operation was likely
+	  involved in order to acquire the mutex.  This event generally implies
+	  higher cost / longer delay, and should be investigated if it happens
+	  often.</para>
+
+	  <para><varname>max_wait_time</varname> (<type>uint64_t</type>):
+	  Maximum length of time in nanoseconds spent on a single wait-acquired
+	  lock operation.  Note that to avoid profiling overhead on the common
+	  path, this does not consider spin-acquired cases.</para>
+
+	  <para><varname>total_wait_time</varname> (<type>uint64_t</type>):
+	  Cumulative time in nanoseconds spent on wait-acquired lock operations.
+	  Similarly, spin-acquired cases are not considered.</para>
+
+	  <para><varname>max_num_thds</varname> (<type>uint32_t</type>): Maximum
+	  number of threads waiting on this mutex simultaneously.  Similarly,
+	  spin-acquired cases are not considered.</para>
+
+	  <para><varname>num_owner_switch</varname> (<type>uint64_t</type>):
+	  Number of times the current mutex owner is different from the previous
+	  one.  This event does not generally imply an issue; rather it is an
+	  indicator of how often the protected data are accessed by different
+	  threads.
+	  </para>
+	  </listitem>
+	</varlistentry>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.mutexes.background_thread">
+        <term>
+          <mallctl>stats.mutexes.background_thread.{counter}</mallctl>
+	  (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>background_thread</varname> mutex
+        (global scope; <link
+        linkend="background_thread"><mallctl>background_thread</mallctl></link>
+        related).  <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.mutexes.prof">
+        <term>
+          <mallctl>stats.mutexes.prof.{counter}</mallctl>
+	  (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>prof</varname> mutex (global
+        scope; profiling related).  <mallctl>{counter}</mallctl> is one of the
+        counters in <link linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.mutexes.reset">
+        <term>
+          <mallctl>stats.mutexes.reset</mallctl>
+	  (<type>void</type>) <literal>--</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Reset all mutex profile statistics, including global
+        mutexes, arena mutexes and bin mutexes.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.dss">
@@ -2081,16 +2443,29 @@ struct extent_hooks_s {
         </para></listitem>
       </varlistentry>
 
-      <varlistentry id="stats.arenas.i.decay_time">
+      <varlistentry id="stats.arenas.i.dirty_decay_ms">
         <term>
-          <mallctl>stats.arenas.&lt;i&gt;.decay_time</mallctl>
+          <mallctl>stats.arenas.&lt;i&gt;.dirty_decay_ms</mallctl>
           (<type>ssize_t</type>)
           <literal>r-</literal>
         </term>
-        <listitem><para>Approximate time in seconds from the creation of a set
-        of unused dirty pages until an equivalent set of unused dirty pages is
-        purged and/or reused.  See <link
-        linkend="opt.decay_time"><mallctl>opt.decay_time</mallctl></link>
+        <listitem><para>Approximate time in milliseconds from the creation of a
+        set of unused dirty pages until an equivalent set of unused dirty pages
+        is purged and/or reused.  See <link
+        linkend="opt.dirty_decay_ms"><mallctl>opt.dirty_decay_ms</mallctl></link>
+        for details.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.muzzy_decay_ms">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.muzzy_decay_ms</mallctl>
+          (<type>ssize_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Approximate time in milliseconds from the creation of a
+        set of unused muzzy pages until an equivalent set of unused muzzy pages
+        is purged and/or reused.  See <link
+        linkend="opt.muzzy_decay_ms"><mallctl>opt.muzzy_decay_ms</mallctl></link>
         for details.</para></listitem>
       </varlistentry>
 
@@ -2102,6 +2477,18 @@ struct extent_hooks_s {
         </term>
         <listitem><para>Number of threads currently assigned to
         arena.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.uptime">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.uptime</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Time elapsed (in nanoseconds) since the arena was
+        created.  If &lt;i&gt; equals <constant>0</constant> or
+        <constant>MALLCTL_ARENAS_ALL</constant>, this is the uptime since malloc
+        initialization.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.pactive">
@@ -2120,10 +2507,22 @@ struct extent_hooks_s {
           <literal>r-</literal>
         </term>
         <listitem><para>Number of pages within unused extents that are
-        potentially dirty, and for which
-        <function>madvise(<parameter>...</parameter>
-        <parameter><constant>MADV_DONTNEED</constant></parameter>)</function> or
-        similar has not been called.</para></listitem>
+        potentially dirty, and for which <function>madvise()</function> or
+        similar has not been called.  See <link
+        linkend="opt.dirty_decay_ms"><mallctl>opt.dirty_decay_ms</mallctl></link>
+        for a description of dirty pages.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.pmuzzy">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.pmuzzy</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Number of pages within unused extents that are muzzy.
+        See <link
+        linkend="opt.muzzy_decay_ms"><mallctl>opt.muzzy_decay_ms</mallctl></link>
+        for a description of muzzy pages.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.mapped">
@@ -2173,6 +2572,18 @@ struct extent_hooks_s {
         profiles.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="stats.arenas.i.metadata_thp">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.metadata_thp</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Number of transparent huge pages (THP) used for
+        metadata.  See <link linkend="opt.metadata_thp">opt.metadata_thp</link>
+        for details.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="stats.arenas.i.resident">
         <term>
           <mallctl>stats.arenas.&lt;i&gt;.resident</mallctl>
@@ -2189,9 +2600,9 @@ struct extent_hooks_s {
         size.</para></listitem>
       </varlistentry>
 
-      <varlistentry id="stats.arenas.i.npurge">
+      <varlistentry id="stats.arenas.i.dirty_npurge">
         <term>
-          <mallctl>stats.arenas.&lt;i&gt;.npurge</mallctl>
+          <mallctl>stats.arenas.&lt;i&gt;.dirty_npurge</mallctl>
           (<type>uint64_t</type>)
           <literal>r-</literal>
           [<option>--enable-stats</option>]
@@ -2200,26 +2611,57 @@ struct extent_hooks_s {
         </para></listitem>
       </varlistentry>
 
-      <varlistentry id="stats.arenas.i.nmadvise">
+      <varlistentry id="stats.arenas.i.dirty_nmadvise">
         <term>
-          <mallctl>stats.arenas.&lt;i&gt;.nmadvise</mallctl>
+          <mallctl>stats.arenas.&lt;i&gt;.dirty_nmadvise</mallctl>
           (<type>uint64_t</type>)
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Number of <function>madvise(<parameter>...</parameter>
-        <parameter><constant>MADV_DONTNEED</constant></parameter>)</function> or
-        similar calls made to purge dirty pages.</para></listitem>
+        <listitem><para>Number of <function>madvise()</function> or similar
+        calls made to purge dirty pages.</para></listitem>
       </varlistentry>
 
-      <varlistentry id="stats.arenas.i.purged">
+      <varlistentry id="stats.arenas.i.dirty_purged">
         <term>
-          <mallctl>stats.arenas.&lt;i&gt;.purged</mallctl>
+          <mallctl>stats.arenas.&lt;i&gt;.dirty_purged</mallctl>
           (<type>uint64_t</type>)
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Number of pages purged.</para></listitem>
+        <listitem><para>Number of dirty pages purged.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.muzzy_npurge">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.muzzy_npurge</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Number of muzzy page purge sweeps performed.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.muzzy_nmadvise">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.muzzy_nmadvise</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Number of <function>madvise()</function> or similar
+        calls made to purge muzzy pages.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.muzzy_purged">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.muzzy_purged</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Number of muzzy pages purged.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.small.allocated">
@@ -2240,8 +2682,11 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of allocation requests served by
-        small bins.</para></listitem>
+        <listitem><para>Cumulative number of times a small allocation was
+        requested from the arena's bins, whether to fill the relevant tcache if
+        <link linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is
+        enabled, or to directly satisfy an allocation request
+        otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.small.ndalloc">
@@ -2251,8 +2696,11 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of small objects returned to bins.
-        </para></listitem>
+        <listitem><para>Cumulative number of times a small allocation was
+        returned to the arena's bins, whether to flush the relevant tcache if
+        <link linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is
+        enabled, or to directly deallocate an allocation
+        otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.small.nrequests">
@@ -2262,8 +2710,8 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of small allocation requests.
-        </para></listitem>
+        <listitem><para>Cumulative number of allocation requests satisfied by
+        all bin size classes.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.large.allocated">
@@ -2284,8 +2732,11 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of large allocation requests served
-        directly by the arena.</para></listitem>
+        <listitem><para>Cumulative number of times a large extent was allocated
+        from the arena, whether to fill the relevant tcache if <link
+        linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is enabled and
+        the size class is within the range being cached, or to directly satisfy
+        an allocation request otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.large.ndalloc">
@@ -2295,8 +2746,11 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of large deallocation requests served
-        directly by the arena.</para></listitem>
+        <listitem><para>Cumulative number of times a large extent was returned
+        to the arena, whether to flush the relevant tcache if <link
+        linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is enabled and
+        the size class is within the range being cached, or to directly
+        deallocate an allocation otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.large.nrequests">
@@ -2306,8 +2760,8 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of large allocation requests.
-        </para></listitem>
+        <listitem><para>Cumulative number of allocation requests satisfied by
+        all large size classes.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.bins.j.nmalloc">
@@ -2317,8 +2771,11 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of allocations served by bin.
-        </para></listitem>
+        <listitem><para>Cumulative number of times a bin region of the
+        corresponding size class was allocated from the arena, whether to fill
+        the relevant tcache if <link
+        linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is enabled, or
+        to directly satisfy an allocation request otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.bins.j.ndalloc">
@@ -2328,8 +2785,11 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of allocations returned to bin.
-        </para></listitem>
+        <listitem><para>Cumulative number of times a bin region of the
+        corresponding size class was returned to the arena, whether to flush the
+        relevant tcache if <link
+        linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is enabled, or
+        to directly deallocate an allocation otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.bins.j.nrequests">
@@ -2339,8 +2799,8 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of allocation
-        requests.</para></listitem>
+        <listitem><para>Cumulative number of allocation requests satisfied by
+        bin regions of the corresponding size class.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.bins.j.curregs">
@@ -2359,7 +2819,6 @@ struct extent_hooks_s {
           <mallctl>stats.arenas.&lt;i&gt;.bins.&lt;j&gt;.nfills</mallctl>
           (<type>uint64_t</type>)
           <literal>r-</literal>
-          [<option>--enable-stats</option> <option>--enable-tcache</option>]
         </term>
         <listitem><para>Cumulative number of tcache fills.</para></listitem>
       </varlistentry>
@@ -2369,7 +2828,6 @@ struct extent_hooks_s {
           <mallctl>stats.arenas.&lt;i&gt;.bins.&lt;j&gt;.nflushes</mallctl>
           (<type>uint64_t</type>)
           <literal>r-</literal>
-          [<option>--enable-stats</option> <option>--enable-tcache</option>]
         </term>
         <listitem><para>Cumulative number of tcache flushes.</para></listitem>
       </varlistentry>
@@ -2405,6 +2863,19 @@ struct extent_hooks_s {
         <listitem><para>Current number of slabs.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="stats.arenas.i.bins.mutex">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.bins.&lt;j&gt;.mutex.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on
+        <varname>arena.&lt;i&gt;.bins.&lt;j&gt;</varname> mutex (arena bin
+        scope; bin operation related).  <mallctl>{counter}</mallctl> is one of
+        the counters in <link linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="stats.arenas.i.lextents.j.nmalloc">
         <term>
           <mallctl>stats.arenas.&lt;i&gt;.lextents.&lt;j&gt;.nmalloc</mallctl>
@@ -2412,8 +2883,12 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of allocation requests for this size
-        class served directly by the arena.</para></listitem>
+        <listitem><para>Cumulative number of times a large extent of the
+        corresponding size class was allocated from the arena, whether to fill
+        the relevant tcache if <link
+        linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is enabled and
+        the size class is within the range being cached, or to directly satisfy
+        an allocation request otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.lextents.j.ndalloc">
@@ -2423,8 +2898,12 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of deallocation requests for this
-        size class served directly by the arena.</para></listitem>
+        <listitem><para>Cumulative number of times a large extent of the
+        corresponding size class was returned to the arena, whether to flush the
+        relevant tcache if <link
+        linkend="opt.tcache"><mallctl>opt.tcache</mallctl></link> is enabled and
+        the size class is within the range being cached, or to directly
+        deallocate an allocation otherwise.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.lextents.j.nrequests">
@@ -2434,8 +2913,8 @@ struct extent_hooks_s {
           <literal>r-</literal>
           [<option>--enable-stats</option>]
         </term>
-        <listitem><para>Cumulative number of allocation requests for this size
-        class.</para></listitem>
+        <listitem><para>Cumulative number of allocation requests satisfied by
+        large extents of the corresponding size class.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.lextents.j.curlextents">
@@ -2448,6 +2927,125 @@ struct extent_hooks_s {
         <listitem><para>Current number of large allocations for this size class.
         </para></listitem>
       </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.large">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.large.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.large</varname>
+        mutex (arena scope; large allocation related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.extent_avail">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.extent_avail.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.extent_avail
+        </varname> mutex (arena scope; extent avail related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.extents_dirty">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.extents_dirty.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.extents_dirty
+        </varname> mutex (arena scope; dirty extents related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.extents_muzzy">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.extents_muzzy.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.extents_muzzy
+        </varname> mutex (arena scope; muzzy extents related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.extents_retained">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.extents_retained.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.extents_retained
+        </varname> mutex (arena scope; retained extents related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.decay_dirty">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.decay_dirty.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.decay_dirty
+        </varname> mutex (arena scope; decay for dirty pages related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.decay_muzzy">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.decay_muzzy.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.decay_muzzy
+        </varname> mutex (arena scope; decay for muzzy pages related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.base">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.base.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on <varname>arena.&lt;i&gt;.base</varname>
+        mutex (arena scope; base allocator related).
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.arenas.i.mutexes.tcache_list">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.mutexes.tcache_list.{counter}</mallctl>
+          (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on
+        <varname>arena.&lt;i&gt;.tcache_list</varname> mutex (arena scope;
+        tcache to arena association related).  This mutex is expected to be
+        accessed less often.  <mallctl>{counter}</mallctl> is one of the
+        counters in <link linkend="mutex_counters">mutex profiling
+        counters</link>.</para></listitem>
+      </varlistentry>
+
     </variablelist>
   </refsect1>
   <refsect1 id="heap_profile_format">

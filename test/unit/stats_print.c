@@ -1,5 +1,7 @@
 #include "test/jemalloc_test.h"
 
+#include "jemalloc/internal/util.h"
+
 typedef enum {
 	TOKEN_TYPE_NONE,
 	TOKEN_TYPE_ERROR,
@@ -938,11 +940,16 @@ TEST_BEGIN(test_stats_print_json) {
 		"Ja",
 		"Jb",
 		"Jl",
+		"Jx",
 		"Jbl",
 		"Jal",
 		"Jab",
 		"Jabl",
-		"Jgmdabl",
+		"Jax",
+		"Jbx",
+		"Jlx",
+		"Jablx",
+		"Jgmdablx",
 	};
 	unsigned arena_ind, i;
 
